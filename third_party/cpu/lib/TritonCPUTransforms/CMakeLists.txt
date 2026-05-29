@@ -1,6 +1,7 @@
 add_triton_library(TritonCPUTransforms
     ConvertDotOp/ConvertDotCommon.cpp
     ConvertDotOp/ConvertDotGeneric.cpp
+    ConvertDotOp/ConvertDotToSVE2I8MM.cpp
     ConvertDotOp/ConvertDotToAMX.cpp
     ConvertDotOp/ConvertDotToFMA.cpp
     ConvertDotOp/ConvertDotOpToUkernelOps.cpp

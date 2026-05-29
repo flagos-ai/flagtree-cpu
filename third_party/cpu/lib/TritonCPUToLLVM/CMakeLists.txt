@@ -8,6 +8,7 @@ add_triton_library(TritonCPUToLLVM
     LowerMultiReduction.cpp
     MathToVecLib.cpp
     MemoryOpToLLVM.cpp
+    NeonSdotToLLVM.cpp
     TypeConverter.cpp
     Utility.cpp
 

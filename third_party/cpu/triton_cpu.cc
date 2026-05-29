@@ -122,6 +122,9 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
     pm.addPass(mlir::triton::cpu::createConvertDotToAMX(
         convertInt8, convertFp16, convertBf16));
   });
+  m.def("add_convert_dot_to_sve2_i8mm", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createConvertDotToSVE2I8MM());
+  });
   m.def("add_convert_dot_to_fma", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createConvertDotToFMA());
   });
@@ -174,6 +177,9 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
   m.def("add_ukernels_to_xsmm_llvmir", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createUkernelOpsToXSMMLLVMPass());
   });
+  m.def("add_neon_sdot_to_llvmir", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createNeonSdotToLLVMPass());
+  });
   m.def("add_expand_strided_metadata", [](mlir::PassManager &pm) {
     pm.addPass(mlir::memref::createExpandStridedMetadataPass());
   });
@@ -182,10 +188,15 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
           mlir::ConvertVectorToLLVMPassOptions opts;
           opts.reassociateFPReductions = reassoc_fp_reduction;
           // opts.force32BitVectorIndices = true;
+          // amx / x86Vector are x86-only. On aarch64 (a66376b0) enabling them
+          // makes ConvertVectorToLLVM pull in the unregistered AMX dialect
+          // (mlir::amx::TileType) and abort. Gate them to x86.
+#if defined(__x86_64__) || defined(__i386__)
           opts.amx = true;
+          opts.x86Vector = true;
+#endif
           // opts.armNeon = false;
           // opts.armSVE = false;
-          opts.x86Vector = true;
           // opts.vectorTransformsOptions();
           // TODO: Check whether we need these parameters.
           // Somehow it helps arm.
@@ -202,7 +213,7 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
           // VectorContractLowering::OuterProduct somehow
           // works, but it might not be the most performant way. It's most
           // widely used path for this lowering in CPU case.
-          opts.vectorContractLowering =
+          opts.vectorTransformsOptions.vectorContractLowering =
               mlir::vector::VectorContractLowering::OuterProduct;
           pm.addPass(mlir::createConvertVectorToLLVMPass(opts));
         });

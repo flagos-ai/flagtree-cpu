@@ -1,6 +1,7 @@
 import functools
 import hashlib
 import os
+import platform
 import tempfile
 from pathlib import Path
 
@@ -15,8 +16,9 @@ import triton.backends.cpu.driver as cpu_driver
 
 
 def min_dot_size(target: GPUTarget):
-    # Other architectures will only support 16,16,16
-    return lambda lhsType, rhsType: (4, 4, 4)
+    # Allow M=1 for true GEMV decode workloads (M=1 token generation)
+    # N and K still require >=4 for tl.dot tiling constraints
+    return lambda lhsType, rhsType: (1, 4, 4)
 
 
 VecLib = cpu.passes.ttcpuir.VecLib
@@ -117,9 +119,27 @@ class CPUBackend(BaseBackend):
     def __init__(self, target: tuple) -> None:
         super().__init__(target)
         self.binary_ext = "so"
-        self.cpu_arch = llvm.get_cpu_tripple().split("-")[0]
+        self.cpu_arch = platform.machine()
         self.cpu_name = llvm.get_cpu_name()
         self.cpu_features = llvm.get_cpu_features()
+        # LLVM get_cpu_features() on aarch64 misses several features (e.g. i8mm, bf16).
+        # Supplement from /proc/cpuinfo 'Features' line on Linux.
+        if platform.system() == "Linux" and self.cpu_arch == "aarch64":
+            try:
+                with open("/proc/cpuinfo") as f:
+                    for line in f:
+                        if line.startswith("Features"):
+                            proc_feats = set(line.split(":")[1].split())
+                            _feat_map = {
+                                "i8mm": "i8mm", "svei8mm": "i8mm",
+                                "bf16": "bf16", "svebf16": "bf16", "asimdbf16": "bf16",
+                            }
+                            for pf, lf in _feat_map.items():
+                                if pf in proc_feats:
+                                    self.cpu_features.add(lf)
+                            break
+            except OSError:
+                pass
         if 'amx-tile' in self.cpu_features:
             if not cpu.enable_amx():
                 import warnings
@@ -179,7 +199,11 @@ class CPUBackend(BaseBackend):
         cpu.passes.ttcpuir.add_convert_elem_manip_ops(pm)
         cpu.passes.ttcpuir.add_convert_dot_op(pm)
         cpu.passes.ttcpuir.add_convert_histogram_op(pm)
-        cpu.passes.ttcpuir.add_convert_reduction_op(pm, True, False)
+        # Second param: use_multidim_reduction_op=True preserves
+        # vector.MultiDimReductionOp for 2D reductions, enabling the
+        # ConvertDotProduct (BFDOT) pass in make_tttcir to match bf16
+        # dot product patterns: MulFOp(bf16) -> ExtFOp -> MultiDimReductionOp.
+        cpu.passes.ttcpuir.add_convert_reduction_op(pm, True, True)
         cpu.passes.ttcpuir.add_convert_scan_op(pm)
         cpu.passes.ttcpuir.add_convert_cf_ops(pm)
         cpu.passes.ttcpuir.add_convert_atomic_ops(pm)
@@ -209,6 +233,14 @@ class CPUBackend(BaseBackend):
         if convert_bf16_dot_product:
             use_horizontal_sum = os.getenv("TRITON_CPU_DOT_PROD_HORIZ_SUM", "1") == "1"
             cpu.passes.ttcpuir.add_convert_dot_product(pm, use_horizontal_sum)
+        disable_sve2_i8mm = os.getenv("TRITON_CPU_DISABLE_SVE2_I8MM", "0").upper() in (
+            "1", "ON", "YES", "TRUE", "Y",
+        )
+        convert_sve2_i8mm = (not disable_sve2_i8mm and
+                             (self.cpu_arch == "aarch64" or self.cpu_arch == "armv8") and
+                             ("sve2" in self.cpu_features))
+        if convert_sve2_i8mm:
+            cpu.passes.ttcpuir.add_convert_dot_to_sve2_i8mm(pm)
         if 'amx-tile' in self.cpu_features:
             amx_int8 = 'amx-int8' in self.cpu_features
             # amx_fp16 = 'amx-fp16' in self.cpu_features
@@ -249,6 +281,9 @@ class CPUBackend(BaseBackend):
             cpu.passes.ttcpuir.add_ukernels_to_onednn_llvmir(pm)
         if options.get_ukernels() == Ukernels.XSMM:
             cpu.passes.ttcpuir.add_ukernels_to_xsmm_llvmir(pm)
+        # TLE-CPU: lower NeonSdotOp / TLE-Struct micro-kernel ops to LLVM
+        if platform.machine() in ("aarch64", "arm64"):
+            cpu.passes.ttcpuir.add_neon_sdot_to_llvmir(pm)
         cpu.passes.ttcpuir.add_lower_vector_multi_dim(pm)
         cpu.passes.ttcpuir.add_expand_strided_metadata(pm)
         cpu.passes.ttcpuir.add_vector_to_scf(pm, True, 1, False)

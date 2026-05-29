@@ -472,7 +472,10 @@ class CPUDriver(DriverBase):
     def get_current_target(self):
         # Capability and warp size are zeros for CPU.
         # TODO: GPUTarget naming isn't obviously good.
-        cpu_arch = llvm.get_cpu_tripple().split("-")[0]
+        # Use platform.machine() instead of llvm.get_cpu_tripple() which
+        # incorrectly returns "x86_64" on AArch64 hosts.
+        import platform
+        cpu_arch = platform.machine()
         return GPUTarget("cpu", cpu_arch, 0)
 
     def get_device_interface(self):

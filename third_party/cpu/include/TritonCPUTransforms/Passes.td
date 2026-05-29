@@ -125,6 +125,23 @@ def ConvertDotToAMX : Pass<"triton-cpu-convert-dot-to-amx", "mlir::ModuleOp"> {
                              "mlir::triton::cpu::TritonCPUDialect"];
 }
 
+def ConvertDotToSVE2I8MM
+    : Pass<"triton-cpu-convert-dot-to-sve2-i8mm", "mlir::ModuleOp"> {
+    let summary = "Convert dot product op to SVE2 i8mm intrinsics.";
+    let description = [{
+        This pass is used to lower int8 matmul operations to SVE2 i8mm
+        instructions (smmla/ummla).
+    }];
+
+    let constructor = "mlir::triton::cpu::createConvertDotToSVE2I8MM()";
+
+    let dependentDialects = ["mlir::arith::ArithDialect",
+                             "mlir::vector::VectorDialect",
+                             "mlir::LLVM::LLVMDialect",
+                             "mlir::triton::TritonDialect",
+                             "mlir::triton::cpu::TritonCPUDialect"];
+}
+
 def ConvertDotToFMA : Pass<"triton-cpu-convert-dot-to-fma", "mlir::ModuleOp"> {
     let summary = "Decompose dot product op to a series of FMA operations.";
     let description = [{ }];

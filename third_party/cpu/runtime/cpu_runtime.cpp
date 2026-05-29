@@ -30,7 +30,11 @@ const int ELEMS_PER_LINE = 8;
 
 using FLOAT16 = struct _FLOAT16 {
 #ifdef FLT16_MAX
+#if defined(__GNUC__) && !defined(__clang__) && defined(__aarch64__)
+  __fp16 x;
+#else
   _Float16 x;
+#endif
 #else
   uint16_t x;
 #endif
