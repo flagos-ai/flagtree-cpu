@@ -387,6 +387,133 @@ struct FusedMlpOpLowering : public OpRewritePattern<triton::cpu::FusedMlpOp> {
   }
 };
 
+// ---------- CpuSmeGemmOp → runtime call (ARM SME int8 GEMM) ----------
+
+struct SmeGemmOpLowering : public OpRewritePattern<triton::cpu::SmeGemmOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(triton::cpu::SmeGemmOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto module = op->getParentOfType<ModuleOp>();
+    auto i64Ty = IntegerType::get(ctx, 64);
+    auto ptrTy = LLVM::LLVMPointerType::get(ctx);
+
+    auto funcName = "sme_gemm_int32";
+    auto funcOp = module.lookupSymbol<LLVM::LLVMFuncOp>(funcName);
+    if (!funcOp) {
+      auto voidTy = LLVM::LLVMVoidType::get(ctx);
+      auto funcType = LLVM::LLVMFunctionType::get(
+          voidTy, {ptrTy, ptrTy, ptrTy, i64Ty, i64Ty, i64Ty}, false);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
+          UnknownLoc::get(ctx), funcName, funcType);
+    }
+
+    auto castPtr = [&](Value v) -> Value {
+      if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
+      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+          .getResult(0);
+    };
+
+    rewriter.create<LLVM::CallOp>(
+        loc, funcOp,
+        ValueRange{castPtr(op.getApPtr()), castPtr(op.getBpPtr()),
+                   castPtr(op.getCPtr()), op.getMp(), op.getNp(), op.getK4()});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// ---------- CpuSmmlaUkOp → runtime call (TLE-Struct micro-kernel) ----------
+
+struct SmmlaUkOpLowering : public OpRewritePattern<triton::cpu::SmmlaUkOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(triton::cpu::SmmlaUkOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto module = op->getParentOfType<ModuleOp>();
+    auto i64Ty = IntegerType::get(ctx, 64);
+    auto ptrTy = LLVM::LLVMPointerType::get(ctx);
+
+    auto funcName = "smmla_uk";
+    auto funcOp = module.lookupSymbol<LLVM::LLVMFuncOp>(funcName);
+    if (!funcOp) {
+      auto voidTy = LLVM::LLVMVoidType::get(ctx);
+      auto funcType = LLVM::LLVMFunctionType::get(
+          voidTy, {ptrTy, ptrTy, ptrTy, ptrTy, ptrTy, i64Ty, i64Ty, i64Ty, i64Ty, i64Ty},
+          false);
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
+          UnknownLoc::get(ctx), funcName, funcType);
+    }
+
+    auto castPtr = [&](Value v) -> Value {
+      if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
+      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+          .getResult(0);
+    };
+
+    rewriter.create<LLVM::CallOp>(
+        loc, funcOp,
+        ValueRange{castPtr(op.getApPtr()), castPtr(op.getWpPtr()), castPtr(op.getCPtr()),
+                   castPtr(op.getXsPtr()), castPtr(op.getWsPtr()),
+                   op.getK8(), op.getMP(), op.getN(), op.getMp0(), op.getNp0()});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// ---------- More TLE-Struct micro-kernel ops → runtime calls ----------
+namespace {
+LLVM::LLVMFuncOp getOrDeclare(PatternRewriter &rewriter, ModuleOp module,
+                              StringRef name, ArrayRef<Type> argTys) {
+  auto ctx = rewriter.getContext();
+  auto f = module.lookupSymbol<LLVM::LLVMFuncOp>(name);
+  if (f) return f;
+  auto ft = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(ctx), argTys, false);
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPointToStart(module.getBody());
+  return rewriter.create<LLVM::LLVMFuncOp>(UnknownLoc::get(ctx), name, ft);
+}
+} // namespace
+
+#define UK_LOWERING(OpName, RtName)                                            \
+  struct OpName##Lowering : public OpRewritePattern<triton::cpu::OpName> {      \
+    using OpRewritePattern::OpRewritePattern;                                   \
+    LogicalResult matchAndRewrite(triton::cpu::OpName op,                       \
+                                  PatternRewriter &rewriter) const override {   \
+      auto loc = op.getLoc(); auto ctx = rewriter.getContext();                 \
+      auto module = op->getParentOfType<ModuleOp>();                           \
+      auto i64Ty = IntegerType::get(ctx, 64);                                   \
+      auto ptrTy = LLVM::LLVMPointerType::get(ctx);                             \
+      SmallVector<Type> tys;                                                    \
+      for (auto v : op->getOperands())                                          \
+        tys.push_back(isa<IntegerType>(v.getType()) ? (Type)i64Ty : (Type)ptrTy);\
+      auto fn = getOrDeclare(rewriter, module, RtName, tys);                    \
+      auto castPtr = [&](Value v) -> Value {                                    \
+        if (isa<LLVM::LLVMPointerType>(v.getType())) return v;                  \
+        if (isa<IntegerType>(v.getType())) return v;                            \
+        return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v).getResult(0);\
+      };                                                                        \
+      SmallVector<Value> args;                                                  \
+      for (auto v : op->getOperands()) args.push_back(castPtr(v));              \
+      rewriter.create<LLVM::CallOp>(loc, fn, args);                             \
+      rewriter.eraseOp(op);                                                     \
+      return success();                                                         \
+    }                                                                           \
+  };
+UK_LOWERING(SmeUkOp, "sme_uk")
+UK_LOWERING(SdotGemvUkOp, "sdot_gemv_uk")
+UK_LOWERING(SwigluUkOp, "swiglu_uk")
+UK_LOWERING(RmsnormUkOp, "rmsnorm_uk")
+UK_LOWERING(ResidualUkOp, "residual_uk")
+
 // ---------- CpuFlashAttnDecodeOp → runtime call ----------
 
 struct FlashAttnDecodeOpLowering
@@ -550,6 +677,13 @@ std::unique_ptr<Pass> createNeonSdotToLLVMPass() {
       patterns.add<FusedMlpOpLowering>(ctx);
       patterns.add<FusedTransformerLayerOpLowering>(ctx);
       patterns.add<FusedDecodeStepOpLowering>(ctx);
+      patterns.add<SmeGemmOpLowering>(ctx);
+      patterns.add<SmmlaUkOpLowering>(ctx);
+      patterns.add<SmeUkOpLowering>(ctx);
+      patterns.add<SdotGemvUkOpLowering>(ctx);
+      patterns.add<SwigluUkOpLowering>(ctx);
+      patterns.add<RmsnormUkOpLowering>(ctx);
+      patterns.add<ResidualUkOpLowering>(ctx);
       if (failed(applyPatternsGreedily(getOperation(),
                                                std::move(patterns))))
         signalPassFailure();

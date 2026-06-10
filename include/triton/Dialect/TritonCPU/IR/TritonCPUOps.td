@@ -405,4 +405,61 @@ def TTC_SdotPackWeightsOp : TTC_Op<"sdot_pack_weights", []> {
     let assemblyFormat = "$b_ptr `,` $b_packed_ptr `,` $K `,` $N attr-dict `:` type($b_ptr) `,` type($b_packed_ptr)";
 }
 
+def TTC_SmeGemmOp : TTC_Op<"sme_gemm", []> {
+    let summary = "TLE-CPU: INT8 GEMM via ARM SME (SMOPA outer-products)";
+    let description = [{
+      C[Mp][Np] int32 = Ap @ Bp^T using SME SMOPA 16x64 tiles (one shared SME unit).
+      Ap: [Mp/16][K/4][16][4] packed activation; Bp: [Np/64][K/4][4][16][4] packed weight.
+      Calls the sme_gemm_int32 runtime function in libTritonCPURuntime.
+    }];
+    let arguments = (ins TT_Ptr:$ap_ptr, TT_Ptr:$bp_ptr, TT_Ptr:$c_ptr,
+                         I64:$Mp, I64:$Np, I64:$K4);
+    let results = (outs);
+    let assemblyFormat = "$ap_ptr `,` $bp_ptr `,` $c_ptr `,` $Mp `,` $Np `,` $K4 attr-dict `:` type($ap_ptr) `,` type($bp_ptr) `,` type($c_ptr)";
+}
+
+def TTC_SmmlaUkOp : TTC_Op<"smmla_uk", []> {
+    let summary = "TLE-Struct micro-kernel: one fixed 8x8 SMMLA tile (Raw leaf); tiling done by the upper Triton kernel";
+    let arguments = (ins TT_Ptr:$ap_ptr, TT_Ptr:$wp_ptr, TT_Ptr:$c_ptr,
+                         TT_Ptr:$xs_ptr, TT_Ptr:$ws_ptr,
+                         I64:$K8, I64:$MP, I64:$N, I64:$mp0, I64:$np0);
+    let results = (outs);
+    let assemblyFormat = "$ap_ptr `,` $wp_ptr `,` $c_ptr `,` $xs_ptr `,` $ws_ptr `,` $K8 `,` $MP `,` $N `,` $mp0 `,` $np0 attr-dict `:` type($ap_ptr) `,` type($wp_ptr) `,` type($c_ptr) `,` type($xs_ptr) `,` type($ws_ptr)";
+}
+
+def TTC_SmeUkOp : TTC_Op<"sme_uk", []> {
+    let summary = "TLE-Struct micro-kernel: one 16x64 SME GEMM tile (Raw leaf)";
+    let arguments = (ins TT_Ptr:$ap, TT_Ptr:$bp, TT_Ptr:$c, I64:$K4, I64:$Np, I64:$mt, I64:$nt);
+    let results = (outs);
+    let assemblyFormat = "$ap `,` $bp `,` $c `,` $K4 `,` $Np `,` $mt `,` $nt attr-dict `:` type($ap) `,` type($bp) `,` type($c)";
+}
+
+def TTC_SdotGemvUkOp : TTC_Op<"sdot_gemv_uk", []> {
+    let summary = "TLE-Struct micro-kernel: one block of the decode int8 GEMV (Raw leaf)";
+    let arguments = (ins TT_Ptr:$a, TT_Ptr:$b, TT_Ptr:$c, I64:$K4, I64:$N4, I64:$BN4, I64:$blk);
+    let results = (outs);
+    let assemblyFormat = "$a `,` $b `,` $c `,` $K4 `,` $N4 `,` $BN4 `,` $blk attr-dict `:` type($a) `,` type($b) `,` type($c)";
+}
+
+def TTC_SwigluUkOp : TTC_Op<"swiglu_uk", []> {
+    let summary = "TLE-Struct micro-kernel: SwiGLU on one block (Raw leaf)";
+    let arguments = (ins TT_Ptr:$gate, TT_Ptr:$up, TT_Ptr:$out, I64:$off, I64:$n);
+    let results = (outs);
+    let assemblyFormat = "$gate `,` $up `,` $out `,` $off `,` $n attr-dict `:` type($gate) `,` type($up) `,` type($out)";
+}
+
+def TTC_RmsnormUkOp : TTC_Op<"rmsnorm_uk", []> {
+    let summary = "TLE-Struct micro-kernel: RMSNorm on one row (Raw leaf)";
+    let arguments = (ins TT_Ptr:$x, TT_Ptr:$weight, TT_Ptr:$out, I64:$D, I64:$row);
+    let results = (outs);
+    let assemblyFormat = "$x `,` $weight `,` $out `,` $D `,` $row attr-dict `:` type($x) `,` type($weight) `,` type($out)";
+}
+
+def TTC_ResidualUkOp : TTC_Op<"residual_uk", []> {
+    let summary = "TLE-Struct micro-kernel: residual add on one block (Raw leaf)";
+    let arguments = (ins TT_Ptr:$residual, TT_Ptr:$x, I64:$off, I64:$n);
+    let results = (outs);
+    let assemblyFormat = "$residual `,` $x `,` $off `,` $n attr-dict `:` type($residual) `,` type($x)";
+}
+
 #endif

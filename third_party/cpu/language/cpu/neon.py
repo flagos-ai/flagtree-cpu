@@ -69,9 +69,17 @@ def compile_c_to_object(c_source, extra_cflags=None, cache=True):
             return obj_path
 
     import shutil
+    is_macos = platform.system() == "Darwin"
     cc = os.environ.get("CC")
     if cc is None:
-        cc = shutil.which("gcc") or shutil.which("clang")
+        if is_macos:
+            # macOS: /usr/bin/gcc is an Apple clang shim that does NOT support
+            # -fopenmp. Use Homebrew LLVM clang (libomp-capable) instead.
+            cc = ("/opt/homebrew/opt/llvm@18/bin/clang"
+                  if os.path.exists("/opt/homebrew/opt/llvm@18/bin/clang")
+                  else (shutil.which("clang") or shutil.which("gcc")))
+        else:
+            cc = shutil.which("gcc") or shutil.which("clang")
     if cc is None:
         raise RuntimeError("No C compiler found")
 
@@ -92,7 +100,16 @@ def compile_c_to_object(c_source, extra_cflags=None, cache=True):
     cc_cmd = [cc, src_path, "-c", "-O3", "-fPIC", "-o", obj_path]
 
     if machine in ("aarch64", "arm64"):
-        cc_cmd += ["-march=armv8.2-a+dotprod+i8mm+bf16", "-fopenmp"]
+        if is_macos:
+            # Apple M-series: no SVE; apple-m3 implies i8mm/dotprod/bf16/fp16
+            # (clang-18 rejects -mcpu=apple-m4). libomp is keg-only -> add its
+            # include dir so <omp.h> resolves.
+            cc_cmd += ["-mcpu=apple-m3", "-fopenmp"]
+            omp_inc = "/opt/homebrew/opt/libomp/include"
+            if os.path.isdir(omp_inc):
+                cc_cmd += [f"-I{omp_inc}"]
+        else:
+            cc_cmd += ["-march=armv8.2-a+dotprod+i8mm+bf16", "-fopenmp"]
 
     if extra_cflags:
         cc_cmd += extra_cflags

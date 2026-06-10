@@ -24,12 +24,16 @@ from pathlib import Path
 # from third_party/cpu/language/cpu/ into python/triton/language/extra/cpu/,
 # so __file__.resolve() walks into third_party instead of python/triton/).
 import triton as _triton
-_LIB_PATH = Path(_triton.__file__).parent / "_C" / "libTritonCPURuntime.so"
+import platform as _platform
+# macOS produces .dylib (Mach-O), Linux .so (ELF).
+_libname = ("libTritonCPURuntime.dylib" if _platform.system() == "Darwin"
+            else "libTritonCPURuntime.so")
+_LIB_PATH = Path(_triton.__file__).parent / "_C" / _libname
 
 if not _LIB_PATH.exists():
     raise ImportError(
-        f"libTritonCPURuntime.so not found at {_LIB_PATH}. "
-        f"Build triton-cpu or set LD_LIBRARY_PATH to include python/triton/_C."
+        f"{_libname} not found at {_LIB_PATH}. "
+        f"Build triton-cpu or set the dynamic library search path to include python/triton/_C."
     )
 
 _rt = ctypes.CDLL(str(_LIB_PATH))

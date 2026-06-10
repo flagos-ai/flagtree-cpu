@@ -300,6 +300,83 @@ def sdot_pack_weights(b_ptr, b_packed_ptr, K, N, _builder=None):
 
 
 @builtin
+def sme_gemm(ap_ptr, bp_ptr, c_ptr, Mp, Np, K4, _builder=None):
+    """TLE-CPU: INT8 GEMM via ARM SME (SMOPA outer-products).
+
+    C[Mp][Np] int32 = Ap @ Bp^T, computed on the M4 SME unit in 16x64 SMOPA tiles.
+      ap_ptr: [Mp//16, K//4, 16, 4] packed activation panels (int8)
+      bp_ptr: [Np//64, K//4, 4, 16, 4] packed weight panels (int8)
+      c_ptr:  [Mp, Np] int32 output
+    Calls sme_gemm_int32() in libTritonCPURuntime.
+    """
+    def _i64(v):
+        r = _unwrap_if_constexpr(v)
+        return r.handle if hasattr(r, 'handle') else _builder.get_int64(r)
+    _builder.create_cpu_sme_gemm(
+        ap_ptr.handle, bp_ptr.handle, c_ptr.handle, _i64(Mp), _i64(Np), _i64(K4))
+    return None
+
+
+@builtin
+def smmla_uk(ap_ptr, wp_ptr, c_ptr, xs_ptr, ws_ptr, K8, MP, N, mp0, np0, _builder=None):
+    """TLE-Struct micro-kernel: one fixed 8x8 SMMLA output tile (the Raw leaf).
+
+    The M/N tiling is orchestrated by the surrounding @triton.jit kernel (the
+    Struct layer); this op computes ONE 8x8 register-blocked tile at (mp0, np0).
+    Calls smmla_uk() in libTritonCPURuntime.
+    """
+    def _i64(v):
+        r = _unwrap_if_constexpr(v)
+        return r.handle if hasattr(r, 'handle') else _builder.get_int64(r)
+    _builder.create_cpu_smmla_uk(
+        ap_ptr.handle, wp_ptr.handle, c_ptr.handle, xs_ptr.handle, ws_ptr.handle,
+        _i64(K8), _i64(MP), _i64(N), _i64(mp0), _i64(np0))
+    return None
+
+
+def _i64(v, _builder):
+    r = _unwrap_if_constexpr(v)
+    return r.handle if hasattr(r, 'handle') else _builder.get_int64(r)
+
+
+@builtin
+def sme_uk(ap, bp, c, K4, Np, mt, nt, _builder=None):
+    """TLE-Struct micro-kernel: one 16x64 SME GEMM tile."""
+    _builder.create_cpu_sme_uk(ap.handle, bp.handle, c.handle,
+                               _i64(K4,_builder), _i64(Np,_builder), _i64(mt,_builder), _i64(nt,_builder))
+    return None
+
+
+@builtin
+def sdot_gemv_uk(a, b, c, K4, N4, BN4, blk, _builder=None):
+    """TLE-Struct micro-kernel: one block of the decode int8 GEMV."""
+    _builder.create_cpu_sdot_gemv_uk(a.handle, b.handle, c.handle,
+                                     _i64(K4,_builder), _i64(N4,_builder), _i64(BN4,_builder), _i64(blk,_builder))
+    return None
+
+
+@builtin
+def swiglu_uk(gate, up, out, off, n, _builder=None):
+    """TLE-Struct micro-kernel: SwiGLU on one block."""
+    _builder.create_cpu_swiglu_uk(gate.handle, up.handle, out.handle, _i64(off,_builder), _i64(n,_builder))
+    return None
+
+
+@builtin
+def rmsnorm_uk(x, weight, out, D, row, _builder=None):
+    """TLE-Struct micro-kernel: RMSNorm on one row."""
+    _builder.create_cpu_rmsnorm_uk(x.handle, weight.handle, out.handle, _i64(D,_builder), _i64(row,_builder))
+    return None
+
+
+@builtin
+def residual_uk(residual, x, off, n, _builder=None):
+    """TLE-Struct micro-kernel: residual add on one block."""
+    _builder.create_cpu_residual_uk(residual.handle, x.handle, _i64(off,_builder), _i64(n,_builder))
+    return None
+
+
+@builtin
 def sdot(acc, a, b, _builder=None):
     """NEON SDOT: 4-lane signed int8 dot product accumulate.
 

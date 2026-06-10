@@ -140,6 +140,24 @@ class CPUBackend(BaseBackend):
                             break
             except OSError:
                 pass
+        # macOS (Darwin) has no /proc/cpuinfo; query sysctl hw.optional.arm.FEAT_*.
+        # Note: we deliberately do NOT add sve/sve2 here -- Apple M-series cores
+        # (incl. M4) have no SVE/SVE2, so SVE2 i8mm codegen must stay disabled.
+        elif platform.system() == "Darwin" and self.cpu_arch == "arm64":
+            import subprocess
+            _sysctl_map = {
+                "hw.optional.arm.FEAT_I8MM": "i8mm",
+                "hw.optional.arm.FEAT_BF16": "bf16",
+                "hw.optional.arm.FEAT_DotProd": "dotprod",
+            }
+            for oid, lf in _sysctl_map.items():
+                try:
+                    out = subprocess.run(["sysctl", "-n", oid], capture_output=True,
+                                         text=True)
+                    if out.returncode == 0 and out.stdout.strip() == "1":
+                        self.cpu_features.add(lf)
+                except OSError:
+                    pass
         if 'amx-tile' in self.cpu_features:
             if not cpu.enable_amx():
                 import warnings
