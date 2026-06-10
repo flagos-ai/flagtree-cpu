@@ -213,7 +213,7 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
           // VectorContractLowering::OuterProduct somehow
           // works, but it might not be the most performant way. It's most
           // widely used path for this lowering in CPU case.
-          opts.vectorTransformsOptions.vectorContractLowering =
+          opts.vectorContractLowering =
               mlir::vector::VectorContractLowering::OuterProduct;
           pm.addPass(mlir::createConvertVectorToLLVMPass(opts));
         });

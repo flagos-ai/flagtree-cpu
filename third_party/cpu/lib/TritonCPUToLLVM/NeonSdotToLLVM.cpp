@@ -27,8 +27,7 @@ struct NeonSdotOpLowering : public OpRewritePattern<NeonSdotOp> {
     auto ctx = rewriter.getContext();
     auto v4i32Ty = VectorType::get({4}, rewriter.getI32Type());
     auto sdotName = StringAttr::get(ctx, "llvm.aarch64.neon.sdot.v4i32.v16i8");
-    auto result = rewriter.create<LLVM::CallIntrinsicOp>(
-        loc, v4i32Ty, sdotName,
+    auto result = LLVM::CallIntrinsicOp::create(rewriter, loc, v4i32Ty, sdotName,
         ValueRange{op.getAcc(), op.getA(), op.getB()},
         LLVM::FastmathFlagsAttr());
     rewriter.replaceOp(op, result.getResult(0));
@@ -59,15 +58,14 @@ struct SdotGemvOpLowering : public OpRewritePattern<triton::cpu::SdotGemvOp> {
           voidTy, {ptrTy, ptrTy, ptrTy, i64Ty, i64Ty, i64Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     // Convert tt.ptr to llvm.ptr via unrealized_conversion_cast
     auto castToLLVMPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType()))
         return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
@@ -75,12 +73,10 @@ struct SdotGemvOpLowering : public OpRewritePattern<triton::cpu::SdotGemvOp> {
     auto bPtr = castToLLVMPtr(op.getBPackedPtr());
     auto cPtr = castToLLVMPtr(op.getCPtr());
 
-    auto four = rewriter.create<LLVM::ConstantOp>(
-        loc, i64Ty, rewriter.getI64IntegerAttr(4));
-    auto N4 = rewriter.create<LLVM::SDivOp>(loc, i64Ty, op.getN(), four);
+    auto four = LLVM::ConstantOp::create(rewriter, loc, i64Ty, rewriter.getI64IntegerAttr(4));
+    auto N4 = LLVM::SDivOp::create(rewriter, loc, i64Ty, op.getN(), four);
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp, ValueRange{aPtr, bPtr, cPtr, op.getK(), op.getN(), N4});
+    LLVM::CallOp::create(rewriter, loc, funcOp, ValueRange{aPtr, bPtr, cPtr, op.getK(), op.getN(), N4});
     rewriter.eraseOp(op);
     return success();
   }
@@ -114,21 +110,20 @@ struct FusedDecodeStepOpLowering
       auto funcType = LLVM::LLVMFunctionType::get(i64Ty, argTypes, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
     auto toI64 = [&](Value v) -> Value {
       if (v.getType() == i64Ty) return v;
-      return rewriter.create<LLVM::SExtOp>(loc, i64Ty, v);
+      return LLVM::SExtOp::create(rewriter, loc, i64Ty, v);
     };
 
-    auto epsVal = rewriter.create<LLVM::ConstantOp>(loc, f32Ty, op.getRmsEpsAttr());
+    auto epsVal = LLVM::ConstantOp::create(rewriter, loc, f32Ty, op.getRmsEpsAttr());
 
     SmallVector<Value, 20> args;
     args.push_back(toI64(op.getTokenId()));
@@ -152,7 +147,7 @@ struct FusedDecodeStepOpLowering
     args.push_back(toI64(op.getMaxSeq()));
     args.push_back(epsVal);
 
-    auto callOp = rewriter.create<LLVM::CallOp>(loc, funcOp, args);
+    auto callOp = LLVM::CallOp::create(rewriter, loc, funcOp, args);
     rewriter.replaceOp(op, callOp.getResult());
     return success();
   }
@@ -201,17 +196,16 @@ struct FusedTransformerLayerOpLowering
       auto funcType = LLVM::LLVMFunctionType::get(voidTy, argTypes, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    auto epsVal = rewriter.create<LLVM::ConstantOp>(loc, f32Ty, op.getRmsEpsAttr());
+    auto epsVal = LLVM::ConstantOp::create(rewriter, loc, f32Ty, op.getRmsEpsAttr());
 
     SmallVector<Value, 32> args;
     args.push_back(castPtr(op.getHiddenStates()));
@@ -246,7 +240,7 @@ struct FusedTransformerLayerOpLowering
     args.push_back(op.getIntermediate());
     args.push_back(epsVal);
 
-    rewriter.create<LLVM::CallOp>(loc, funcOp, args);
+    LLVM::CallOp::create(rewriter, loc, funcOp, args);
     rewriter.eraseOp(op);
     return success();
   }
@@ -275,23 +269,20 @@ struct SdotGemvFusedBf16OpLowering
           voidTy, {ptrTy, ptrTy, ptrTy, ptrTy, i64Ty, i64Ty, i64Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
     // N4 = N / 4
-    auto four = rewriter.create<LLVM::ConstantOp>(
-        loc, i64Ty, rewriter.getI64IntegerAttr(4));
-    auto N4 = rewriter.create<LLVM::SDivOp>(loc, i64Ty, op.getN(), four);
+    auto four = LLVM::ConstantOp::create(rewriter, loc, i64Ty, rewriter.getI64IntegerAttr(4));
+    auto N4 = LLVM::SDivOp::create(rewriter, loc, i64Ty, op.getN(), four);
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getXPtr()), castPtr(op.getBPackedPtr()),
                    castPtr(op.getWScalePtr()), castPtr(op.getOutPtr()),
                    op.getK(), op.getN(), N4});
@@ -322,18 +313,16 @@ struct SdotPackWeightsOpLowering
           voidTy, {ptrTy, ptrTy, i64Ty, i64Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getBPtr()), castPtr(op.getBPackedPtr()),
                    op.getK(), op.getN()});
     rewriter.eraseOp(op);
@@ -363,18 +352,16 @@ struct FusedMlpOpLowering : public OpRewritePattern<triton::cpu::FusedMlpOp> {
           false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getXPtr()),
                    castPtr(op.getGatePackedPtr()),
                    castPtr(op.getUpPackedPtr()),
@@ -408,18 +395,16 @@ struct SmeGemmOpLowering : public OpRewritePattern<triton::cpu::SmeGemmOp> {
           voidTy, {ptrTy, ptrTy, ptrTy, i64Ty, i64Ty, i64Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getApPtr()), castPtr(op.getBpPtr()),
                    castPtr(op.getCPtr()), op.getMp(), op.getNp(), op.getK4()});
     rewriter.eraseOp(op);
@@ -449,18 +434,16 @@ struct SmmlaUkOpLowering : public OpRewritePattern<triton::cpu::SmmlaUkOp> {
           false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getApPtr()), castPtr(op.getWpPtr()), castPtr(op.getCPtr()),
                    castPtr(op.getXsPtr()), castPtr(op.getWsPtr()),
                    op.getK8(), op.getMP(), op.getN(), op.getMp0(), op.getNp0()});
@@ -479,7 +462,7 @@ LLVM::LLVMFuncOp getOrDeclare(PatternRewriter &rewriter, ModuleOp module,
   auto ft = LLVM::LLVMFunctionType::get(LLVM::LLVMVoidType::get(ctx), argTys, false);
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPointToStart(module.getBody());
-  return rewriter.create<LLVM::LLVMFuncOp>(UnknownLoc::get(ctx), name, ft);
+  return LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), name, ft);
 }
 } // namespace
 
@@ -499,11 +482,11 @@ LLVM::LLVMFuncOp getOrDeclare(PatternRewriter &rewriter, ModuleOp module,
       auto castPtr = [&](Value v) -> Value {                                    \
         if (isa<LLVM::LLVMPointerType>(v.getType())) return v;                  \
         if (isa<IntegerType>(v.getType())) return v;                            \
-        return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v).getResult(0);\
+        return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v).getResult(0);\
       };                                                                        \
       SmallVector<Value> args;                                                  \
       for (auto v : op->getOperands()) args.push_back(castPtr(v));              \
-      rewriter.create<LLVM::CallOp>(loc, fn, args);                             \
+      LLVM::CallOp::create(rewriter, loc, fn, args);                             \
       rewriter.eraseOp(op);                                                     \
       return success();                                                         \
     }                                                                           \
@@ -538,21 +521,18 @@ struct FlashAttnDecodeOpLowering
                    i64Ty, i64Ty, f32Ty, i64Ty, i64Ty, i64Ty, i64Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    auto smScaleVal = rewriter.create<LLVM::ConstantOp>(
-        loc, f32Ty, op.getSmScaleAttr());
+    auto smScaleVal = LLVM::ConstantOp::create(rewriter, loc, f32Ty, op.getSmScaleAttr());
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getQPtr()), castPtr(op.getKPtr()),
                    castPtr(op.getVPtr()), castPtr(op.getOutPtr()),
                    op.getSeqLen(), op.getHeadDim(), smScaleVal,
@@ -585,22 +565,19 @@ struct RmsNormOpLowering : public OpRewritePattern<triton::cpu::RmsNormOp> {
           voidTy, {ptrTy, ptrTy, ptrTy, i64Ty, f32Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
     // Extract eps from F32Attr
-    auto epsVal = rewriter.create<LLVM::ConstantOp>(
-        loc, f32Ty, op.getEpsAttr());
+    auto epsVal = LLVM::ConstantOp::create(rewriter, loc, f32Ty, op.getEpsAttr());
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getXPtr()), castPtr(op.getWeightPtr()),
                    castPtr(op.getOutPtr()), op.getD(), epsVal});
     rewriter.eraseOp(op);
@@ -629,18 +606,16 @@ struct SwigluOpLowering : public OpRewritePattern<triton::cpu::SwigluOp> {
           voidTy, {ptrTy, ptrTy, ptrTy, i64Ty}, false);
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(module.getBody());
-      funcOp = rewriter.create<LLVM::LLVMFuncOp>(
-          UnknownLoc::get(ctx), funcName, funcType);
+      funcOp = LLVM::LLVMFuncOp::create(rewriter, UnknownLoc::get(ctx), funcName, funcType);
     }
 
     auto castPtr = [&](Value v) -> Value {
       if (isa<LLVM::LLVMPointerType>(v.getType())) return v;
-      return rewriter.create<UnrealizedConversionCastOp>(loc, ptrTy, v)
+      return UnrealizedConversionCastOp::create(rewriter, loc, ptrTy, v)
           .getResult(0);
     };
 
-    rewriter.create<LLVM::CallOp>(
-        loc, funcOp,
+    LLVM::CallOp::create(rewriter, loc, funcOp,
         ValueRange{castPtr(op.getGatePtr()), castPtr(op.getUpPtr()),
                    castPtr(op.getOutPtr()), op.getN()});
     rewriter.eraseOp(op);
