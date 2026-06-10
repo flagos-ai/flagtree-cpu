@@ -18,7 +18,11 @@
  */
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
+#include "cpu_features.h"
+
 #include <arm_neon.h>
+#include <cstdio>
+#include <cstdlib>
 #endif
 
 #include <cmath>
@@ -320,7 +324,11 @@ EXPORT void sdot_gemv_m1_fused_bf16(const uint16_t *x_bf16,
 // ============================================================================
 // i8mm SMMLA GEMM (M>1 prefill): weights read once, reused across all M rows.
 // vmmlaq_s32 does a 2x2 output tile (2 m-rows x 2 n-cols) 8-K deep -> ~2x SDOT.
+// Guarded: i8mm is armv8.6 optional-from-8.2; toolchains/targets without it
+// (e.g. plain armv8.2 server builds) still get a symbol-complete library via
+// the stubs below, and runtime dispatch keeps these paths unreachable.
 // ============================================================================
+#if defined(__ARM_FEATURE_MATMUL_INT8)
 
 // Pack int8 [rows, K] -> [rows/2, K/8, 16] (2 rows x 8 K per SMMLA tile).
 EXPORT void smmla_pack_weights(const int8_t *W, int8_t *P, int64_t rows, int64_t K) {
@@ -425,6 +433,8 @@ EXPORT void smmla_gemm_range(const int8_t *Ap, const float *xs, const int8_t *Wp
     }
   }
 }
+
+#endif // __ARM_FEATURE_MATMUL_INT8
 
 // Non-OMP range variant: the CALLER's thread pool (e.g. llama.cpp/ggml) splits
 // [n4_start, n4_start+n4_count) (in N4 = N/4 groups) across its own threads.
@@ -537,8 +547,21 @@ EXPORT void sdot_gemv_blk_prequant_f32_range(const int8_t *xq, float x_scale,
 
 // ---- SME int8 GEMM (prefill). One shared SME unit -> GEMM runs on ONE thread;
 //      activation pack + dequant parallelize across the other ggml threads. ----
+#ifndef TLE_NO_SME_KERNEL
 extern "C" void sme_tile_16x64(const int8_t *, const int8_t *, int32_t *,
-                               int64_t, int64_t);  // runtime_sme_kernel.s
+                               int64_t, int64_t);  // runtime_sme_kernel.S
+#else
+// Assembler lacks SME2; the .S kernel is not in this build. Fail loudly
+// instead of computing garbage -- runtime feature dispatch must keep the
+// SME paths unreachable on such builds.
+static void sme_tile_16x64(const int8_t *, const int8_t *, int32_t *,
+                           int64_t, int64_t) {
+  fprintf(stderr,
+          "TritonCPURuntime: sme_tile_16x64 called but the runtime was built "
+          "without the SME kernel (toolchain lacks SME2)\n");
+  abort();
+}
+#endif
 
 // Pack weight [N][K] int8 -> SME Bp [Np/64][K4][4][16][4] (Np = ceil(N/64)*64).
 EXPORT void sme_pack_weights(const int8_t *W, int8_t *Bp, int64_t N, int64_t K) {
@@ -577,8 +600,16 @@ EXPORT void sme_quant_pack_act_f32(const float *A, int8_t *Ap, float *xs,
 }
 
 // SME GEMM: Ap x Bp -> C int32 [Mp][Np] (padded). Runs on ONE thread (single SME unit).
+// Defense-in-depth: callers must consult tle_cpu_has_sme() before selecting
+// this path; if they didn't, fail loudly here instead of SIGILLing in the
+// tile kernel. (The per-tile sme_uk hot path is gated by the caller only.)
 EXPORT void sme_gemm_int32(const int8_t *Ap, const int8_t *Bp, int32_t *C,
                            int64_t Mp, int64_t Np, int64_t K4) {
+  if (!tle_cpu_has_sme()) {
+    fprintf(stderr, "TritonCPURuntime: sme_gemm_int32 called on a CPU/build "
+                    "without usable SME (check tle_cpu_has_sme() first)\n");
+    abort();
+  }
   int64_t MT = Mp / 16, NT = Np / 64;
   for (int64_t mt = 0; mt < MT; mt++)
     for (int64_t nt = 0; nt < NT; nt++)
@@ -590,6 +621,7 @@ EXPORT void sme_gemm_int32(const int8_t *Ap, const int8_t *Bp, int32_t *C,
 //       4 np-pairs, 16 accumulators in registers). This is the "Raw leaf"; the
 //       M/N tiling is orchestrated by the upper Triton kernel (the Struct layer).
 //       Ap ko-major [K8][MP][16], Wp n-major [N/2][K8][16], C row-major + dequant.
+#if defined(__ARM_FEATURE_MATMUL_INT8)
 EXPORT void smmla_uk(const int8_t *Ap, const int8_t *Wp, float *C,
                      const float *xs, const float *ws,
                      int64_t K8, int64_t MP, int64_t N, int64_t mp0, int64_t np0) {
@@ -611,6 +643,31 @@ EXPORT void smmla_uk(const int8_t *Ap, const int8_t *Wp, float *C,
   for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++)
     smmla_store(C, N, xs, ws, mp0 + i, np0 + j, acc[i][j]);
 }
+#endif // __ARM_FEATURE_MATMUL_INT8
+
+#if !defined(__ARM_FEATURE_MATMUL_INT8)
+// i8mm not available in this build: keep the C ABI symbol-complete. The GEMM
+// entry points abort (silent wrong results are worse); runtime dispatch
+// (tle_cpu_has_i8mm) must keep them unreachable.
+static void tle_no_i8mm_abort(const char *fn) {
+  fprintf(stderr, "TritonCPURuntime: %s called but the runtime was built "
+                  "without i8mm (SMMLA) support\n", fn);
+  abort();
+}
+EXPORT void smmla_pack_weights(const int8_t *, int8_t *, int64_t, int64_t) {}
+EXPORT void smmla_quant_pack_act_f32(const float *, int8_t *, float *, int64_t,
+                                     int64_t, int64_t, int64_t) {}
+EXPORT void smmla_gemm_range(const int8_t *, const float *, const int8_t *,
+                             const float *, float *, int64_t, int64_t, int64_t,
+                             int64_t, int64_t) {
+  tle_no_i8mm_abort("smmla_gemm_range");
+}
+EXPORT void smmla_uk(const int8_t *, const int8_t *, float *, const float *,
+                     const float *, int64_t, int64_t, int64_t, int64_t,
+                     int64_t) {
+  tle_no_i8mm_abort("smmla_uk");
+}
+#endif // !__ARM_FEATURE_MATMUL_INT8
 
 // ===== More TLE-Struct micro-kernels: each is a fixed Raw leaf; the M/N/row/block
 //       tiling is orchestrated by the upper @triton.jit kernel (the Struct layer).

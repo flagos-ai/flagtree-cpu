@@ -45,7 +45,9 @@ if(TRITON_BUILD_PYTHON_MODULE)
 endif()
 
 # Configure and build Triton-CPU runtime
-set(TRITON_CPU_RUNTIME_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/runtime/cpu_runtime.cpp)
+set(TRITON_CPU_RUNTIME_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/runtime/cpu_runtime.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/runtime/cpu_features.cpp)
 set(TRITON_CPU_RUNTIME_LIBS LLVMSupport)
 if (dnnl_FOUND AND HAS_UKERNELS)
   set(TRITON_CPU_RUNTIME_SOURCES ${TRITON_CPU_RUNTIME_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_onednn.cpp)
@@ -58,13 +60,38 @@ endif()
 
 # TLE-CPU NEON runtime for ARM64
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-  set(TRITON_CPU_RUNTIME_SOURCES ${TRITON_CPU_RUNTIME_SOURCES}
+  set(TRITON_CPU_ARM64_RUNTIME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_sdot.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_swiglu.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_flash_attn_decode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_fused_mlp.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_transformer_layer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_decode_step.cpp)
+  # Each runtime TU carries its own ISA flags so the library builds with a
+  # plain baseline toolchain on any arm64 (no global -march assumptions).
+  # Guarded paths inside (#if __ARM_FEATURE_*) plus runtime hwcap/sysctl
+  # dispatch keep execution safe on cores without these extensions.
+  set_source_files_properties(${TRITON_CPU_ARM64_RUNTIME_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "-march=armv8.2-a+dotprod+i8mm+bf16+fp16")
+  set(TRITON_CPU_RUNTIME_SOURCES ${TRITON_CPU_RUNTIME_SOURCES}
+    ${TRITON_CPU_ARM64_RUNTIME_SOURCES})
+
+  # SME2 SMOPA tile kernel (.S, C-preprocessed asm). Only added when the
+  # assembler understands SME2; execution is gated by runtime detection.
+  include(CheckCSourceCompiles)
+  set(CMAKE_REQUIRED_FLAGS "-march=armv9-a+sme2")
+  check_c_source_compiles("int main(void){return 0;}" TLE_TOOLCHAIN_HAS_SME2)
+  unset(CMAKE_REQUIRED_FLAGS)
+  if(TLE_TOOLCHAIN_HAS_SME2)
+    enable_language(ASM)
+    set(TRITON_CPU_RUNTIME_SOURCES ${TRITON_CPU_RUNTIME_SOURCES}
+      ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_sme_kernel.S)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_sme_kernel.S
+      PROPERTIES COMPILE_OPTIONS "-march=armv9-a+sme2")
+  else()
+    message(STATUS "Toolchain lacks SME2 support; building TritonCPURuntime without the SME kernel")
+    add_compile_definitions(TLE_NO_SME_KERNEL)
+  endif()
 endif()
 
 add_library(TritonCPURuntime SHARED ${TRITON_CPU_RUNTIME_SOURCES})
@@ -74,7 +101,18 @@ if(APPLE)
   # Homebrew libomp is keg-only, so CMake's FindOpenMP cannot locate it without
   # hints. Point the OpenMP flags/libs at the brew libomp prefix so the runtime
   # .cpp files (which #include <omp.h>) compile and link against -lomp.
-  set(_BREW_LIBOMP "/opt/homebrew/opt/libomp")
+  # TRITON_LIBOMP_DIR overrides; otherwise ask brew (covers /opt/homebrew on
+  # arm64 and /usr/local on x86_64).
+  if(DEFINED ENV{TRITON_LIBOMP_DIR})
+    set(_BREW_LIBOMP "$ENV{TRITON_LIBOMP_DIR}")
+  else()
+    execute_process(COMMAND brew --prefix libomp
+      OUTPUT_VARIABLE _BREW_LIBOMP OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET RESULT_VARIABLE _BREW_RC)
+    if(NOT _BREW_RC EQUAL 0)
+      set(_BREW_LIBOMP "/opt/homebrew/opt/libomp")
+    endif()
+  endif()
   if(EXISTS "${_BREW_LIBOMP}/include/omp.h")
     set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${_BREW_LIBOMP}/include" CACHE STRING "" FORCE)
     set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${_BREW_LIBOMP}/include" CACHE STRING "" FORCE)
@@ -89,9 +127,9 @@ endif()
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(TritonCPURuntime PRIVATE OpenMP::OpenMP_CXX)
-elseif(APPLE AND EXISTS "/opt/homebrew/opt/libomp/lib/libomp.dylib")
+elseif(APPLE AND EXISTS "${_BREW_LIBOMP}/lib/libomp.dylib")
   # Fallback: link brew libomp directly if the imported target was not created.
-  target_link_libraries(TritonCPURuntime PRIVATE "/opt/homebrew/opt/libomp/lib/libomp.dylib")
+  target_link_libraries(TritonCPURuntime PRIVATE "${_BREW_LIBOMP}/lib/libomp.dylib")
 endif()
 
 # Build and link sleef

@@ -197,18 +197,14 @@ endif()
 # Compiler flags
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(NOT MSVC)
-  if(APPLE)
-    # Apple M-series (incl. M4) have NO SVE/SVE2. Emitting armv9-a+sve2 into the
-    # native libtriton.so makes it SIGILL at import on these cores. Use
-    # -mcpu=apple-m3 (i8mm/dotprod/bf16/fp16, no SVE). NOTE: Homebrew clang 18
-    # does not yet accept -mcpu=apple-m4; apple-m3 is the same NEON ISA for the
-    # features we need and is recognized by clang 18.
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++17 -mcpu=apple-m3")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__STDC_FORMAT_MACROS -fPIC -mcpu=apple-m3")
-  else()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++17 -march=armv9-a+sve2+i8mm+bf16+fp16+dotprod -msve-vector-bits=128")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__STDC_FORMAT_MACROS -fPIC -march=armv9-a+sve2+i8mm+bf16+fp16+dotprod -msve-vector-bits=128")
-  endif()
+  # No global ISA flags: baking -march/-mcpu into every TU makes the binaries
+  # microarchitecture-specific (armv9-a+sve2 SIGILLs at import on Apple
+  # M-series and on pre-v9 arm64 servers; -mcpu=apple-m3 is Apple-only). The
+  # ARM64 runtime kernels that need dotprod/i8mm/bf16/SME2 get per-file
+  # COMPILE_OPTIONS in third_party/cpu/CMakeLists.txt, with compile-time
+  # feature guards and runtime hwcap/sysctl dispatch.
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++17")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__STDC_FORMAT_MACROS -fPIC")
 else()
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_FORMAT_MACROS")
 endif()
@@ -480,8 +476,6 @@ add_subdirectory(test)
 add_subdirectory(examples)
 
 if(TRITON_BUILD_UT)
-  add_subdirectory(bin)
-  add_subdirectory(test)
   add_subdirectory(unittest)
   # This target runs all the unit tests.
   add_custom_target(check-triton-unit-tests

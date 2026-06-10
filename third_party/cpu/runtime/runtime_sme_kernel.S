@@ -1,11 +1,25 @@
+// SME2 SMOPA micro-kernel. Preprocessed assembly (.S): SYM() bridges the
+// Mach-O leading-underscore vs ELF symbol naming so the same source
+// assembles on macOS and Linux arm64. NOTE: Apple's arm64 assembler treats
+// ';' as a comment character, so directives must stay one-per-line (no
+// multi-statement macros).
+#ifdef __APPLE__
+#  define SYM(name) _##name
+#else
+#  define SYM(name) name
+#endif
+
 .arch armv9-a+sme2
 .text
 // void sme_tile_16x64(const int8_t* Ap, const int8_t* Bp, int32_t* C, int64_t K4, int64_t ldc_elems)
 //   Ap:[K4][16][4]  Bp:[K4][4][16][4]  C: tile top-left, rows strided by ldc_elems int32
 //   x0=Ap x1=Bp x2=C x3=K4 x4=ldc_elems
-.globl _sme_tile_16x64
+.globl SYM(sme_tile_16x64)
+#ifndef __APPLE__
+.type sme_tile_16x64, %function
+#endif
 .p2align 2
-_sme_tile_16x64:
+SYM(sme_tile_16x64):
     stp     d8,  d9,  [sp, #-64]!
     stp     d10, d11, [sp, #16]
     stp     d12, d13, [sp, #32]
@@ -47,3 +61,7 @@ _sme_tile_16x64:
     ldp     d14, d15, [sp, #48]
     ldp     d8,  d9,  [sp], #64
     ret
+#ifndef __APPLE__
+.size sme_tile_16x64, . - sme_tile_16x64
+.section .note.GNU-stack,"",%progbits
+#endif
