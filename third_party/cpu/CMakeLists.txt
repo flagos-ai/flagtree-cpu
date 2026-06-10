@@ -70,9 +70,28 @@ endif()
 add_library(TritonCPURuntime SHARED ${TRITON_CPU_RUNTIME_SOURCES})
 target_link_libraries(TritonCPURuntime PRIVATE ${TRITON_CPU_RUNTIME_LIBS})
 # OpenMP for SDOT runtime parallelization
+if(APPLE)
+  # Homebrew libomp is keg-only, so CMake's FindOpenMP cannot locate it without
+  # hints. Point the OpenMP flags/libs at the brew libomp prefix so the runtime
+  # .cpp files (which #include <omp.h>) compile and link against -lomp.
+  set(_BREW_LIBOMP "/opt/homebrew/opt/libomp")
+  if(EXISTS "${_BREW_LIBOMP}/include/omp.h")
+    set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${_BREW_LIBOMP}/include" CACHE STRING "" FORCE)
+    set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${_BREW_LIBOMP}/include" CACHE STRING "" FORCE)
+    set(OpenMP_C_LIB_NAMES "omp" CACHE STRING "" FORCE)
+    set(OpenMP_CXX_LIB_NAMES "omp" CACHE STRING "" FORCE)
+    set(OpenMP_omp_LIBRARY "${_BREW_LIBOMP}/lib/libomp.dylib" CACHE STRING "" FORCE)
+    # Make omp.h visible to all runtime translation units regardless of how
+    # FindOpenMP resolves the imported target.
+    include_directories("${_BREW_LIBOMP}/include")
+  endif()
+endif()
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(TritonCPURuntime PRIVATE OpenMP::OpenMP_CXX)
+elseif(APPLE AND EXISTS "/opt/homebrew/opt/libomp/lib/libomp.dylib")
+  # Fallback: link brew libomp directly if the imported target was not created.
+  target_link_libraries(TritonCPURuntime PRIVATE "/opt/homebrew/opt/libomp/lib/libomp.dylib")
 endif()
 
 # Build and link sleef
