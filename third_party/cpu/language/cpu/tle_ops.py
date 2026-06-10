@@ -17,7 +17,7 @@ from triton.language.core import builtin, tensor, _unwrap_if_constexpr
 
 
 @builtin
-def sdot_gemv(a_ptr, b_packed_ptr, c_ptr, K, N, _builder=None):
+def sdot_gemv(a_ptr, b_packed_ptr, c_ptr, K, N, _semantic=None):
     """TLE-CPU: M=1 INT8 GEMV micro-kernel using NEON SDOT with pre-packed weights.
 
     A complete micro-kernel that performs:
@@ -33,6 +33,7 @@ def sdot_gemv(a_ptr, b_packed_ptr, c_ptr, K, N, _builder=None):
         K: activation/weight inner dimension
         N: output dimension
     """
+    _builder = _semantic.builder
     K_raw = _unwrap_if_constexpr(K)
     N_raw = _unwrap_if_constexpr(N)
     K_val = K_raw.handle if hasattr(K_raw, 'handle') else _builder.get_int64(K_raw)
@@ -54,7 +55,7 @@ def fused_decode_step(
     hidden_dim, head_dim, n_heads, n_kv_heads,
     intermediate, vocab_size, n_layers, max_seq,
     rms_eps,
-    _builder=None):
+    _semantic=None):
     """TLE-CPU: Full decode step. Returns next token ID (i64).
 
     embedding → n_layers × transformer layer → final norm → lm_head → argmax.
@@ -101,7 +102,7 @@ def fused_transformer_layer(
     input_norm_ptr, post_norm_ptr,
     hidden_dim, head_dim, n_heads, n_kv_heads, intermediate,
     rms_eps,
-    _builder=None):
+    _semantic=None):
     """TLE-CPU: Full transformer decode layer in one C call.
 
     RMSNorm → QKV GEMV → QK_Norm → RoPE → KV_cache → Attention →
@@ -142,7 +143,7 @@ def fused_transformer_layer(
 
 @builtin
 def fused_mlp(x_ptr, gate_packed_ptr, up_packed_ptr,
-               gate_scale_ptr, up_scale_ptr, out_ptr, K, N, _builder=None):
+               gate_scale_ptr, up_scale_ptr, out_ptr, K, N, _semantic=None):
     """TLE-CPU: Fused MLP = gate SDOT GEMV + up SDOT GEMV + SWIGLU.
 
     Single OMP region replaces 3 separate ops (gate_proj, up_proj, silu_and_mul).
@@ -169,7 +170,7 @@ def fused_mlp(x_ptr, gate_packed_ptr, up_packed_ptr,
 def flash_attn_decode(q_ptr, k_ptr, v_ptr, out_ptr,
                        seq_len, head_dim, sm_scale,
                        num_heads, num_kv_heads,
-                       stride_kn, stride_vn, _builder=None):
+                       stride_kn, stride_vn, _semantic=None):
     """TLE-CPU: M=1 Flash Attention with NEON online softmax.
 
     Replaces ATen SDPA fallback for decode (M=1). Per-row online softmax,
@@ -219,7 +220,7 @@ def flash_attn_decode(q_ptr, k_ptr, v_ptr, out_ptr,
 
 
 @builtin
-def rms_norm(x_ptr, weight_ptr, out_ptr, D, eps, _builder=None):
+def rms_norm(x_ptr, weight_ptr, out_ptr, D, eps, _semantic=None):
     """TLE-CPU: RMSNorm — out = (x / rms(x)) * weight.
 
     Single NEON kernel replaces 5 ATen decomposed ops.
@@ -232,6 +233,7 @@ def rms_norm(x_ptr, weight_ptr, out_ptr, D, eps, _builder=None):
         D: hidden dimension
         eps: epsilon for numerical stability
     """
+    _builder = _semantic.builder
     D_raw = _unwrap_if_constexpr(D)
     D_val = D_raw.handle if hasattr(D_raw, 'handle') else _builder.get_int64(D_raw)
     eps_f = float(_unwrap_if_constexpr(eps))
@@ -240,7 +242,7 @@ def rms_norm(x_ptr, weight_ptr, out_ptr, D, eps, _builder=None):
 
 
 @builtin
-def swiglu(gate_ptr, up_ptr, out_ptr, N, _builder=None):
+def swiglu(gate_ptr, up_ptr, out_ptr, N, _semantic=None):
     """TLE-CPU: Fused SWIGLU activation: out = silu(gate) * up.
 
     Single NEON kernel replaces F.silu(gate) * up (2 ATen calls).
@@ -252,6 +254,7 @@ def swiglu(gate_ptr, up_ptr, out_ptr, N, _builder=None):
         out_ptr: pointer to [N] bfloat16 output
         N: number of elements
     """
+    _builder = _semantic.builder
     N_raw = _unwrap_if_constexpr(N)
     N_val = N_raw.handle if hasattr(N_raw, 'handle') else _builder.get_int64(N_raw)
     _builder.create_cpu_swiglu(gate_ptr.handle, up_ptr.handle, out_ptr.handle, N_val)
@@ -259,7 +262,7 @@ def swiglu(gate_ptr, up_ptr, out_ptr, N, _builder=None):
 
 
 @builtin
-def sdot_gemv_fused_bf16(x_ptr, b_packed_ptr, w_scale_ptr, out_ptr, K, N, _builder=None):
+def sdot_gemv_fused_bf16(x_ptr, b_packed_ptr, w_scale_ptr, out_ptr, K, N, _semantic=None):
     """TLE-CPU: Fused BF16→INT8 quant + SDOT GEMV + dequant→BF16.
 
     Single call replaces: abs().max() → div → clamp → to(int8) → gemv → mul(scale) → to(bf16)
@@ -271,6 +274,7 @@ def sdot_gemv_fused_bf16(x_ptr, b_packed_ptr, w_scale_ptr, out_ptr, K, N, _build
         out_ptr: pointer to [N] bfloat16 output
         K, N: dimensions
     """
+    _builder = _semantic.builder
     K_raw = _unwrap_if_constexpr(K)
     N_raw = _unwrap_if_constexpr(N)
     K_val = K_raw.handle if hasattr(K_raw, 'handle') else _builder.get_int64(K_raw)
@@ -282,7 +286,7 @@ def sdot_gemv_fused_bf16(x_ptr, b_packed_ptr, w_scale_ptr, out_ptr, K, N, _build
 
 
 @builtin
-def sdot_pack_weights(b_ptr, b_packed_ptr, K, N, _builder=None):
+def sdot_pack_weights(b_ptr, b_packed_ptr, K, N, _semantic=None):
     """TLE-CPU: Pack INT8 weights from row-major [K,N] to SDOT format [K//4, N//4, 4, 4].
 
     Args:
@@ -290,6 +294,7 @@ def sdot_pack_weights(b_ptr, b_packed_ptr, K, N, _builder=None):
         b_packed_ptr: pointer to output buffer (pre-allocated)
         K, N: dimensions
     """
+    _builder = _semantic.builder
     K_raw = _unwrap_if_constexpr(K)
     N_raw = _unwrap_if_constexpr(N)
     K_val = K_raw.handle if hasattr(K_raw, 'handle') else _builder.get_int64(K_raw)
@@ -300,7 +305,7 @@ def sdot_pack_weights(b_ptr, b_packed_ptr, K, N, _builder=None):
 
 
 @builtin
-def sme_gemm(ap_ptr, bp_ptr, c_ptr, Mp, Np, K4, _builder=None):
+def sme_gemm(ap_ptr, bp_ptr, c_ptr, Mp, Np, K4, _semantic=None):
     """TLE-CPU: INT8 GEMM via ARM SME (SMOPA outer-products).
 
     C[Mp][Np] int32 = Ap @ Bp^T, computed on the M4 SME unit in 16x64 SMOPA tiles.
@@ -309,6 +314,7 @@ def sme_gemm(ap_ptr, bp_ptr, c_ptr, Mp, Np, K4, _builder=None):
       c_ptr:  [Mp, Np] int32 output
     Calls sme_gemm_int32() in libTritonCPURuntime.
     """
+    _builder = _semantic.builder
     def _i64(v):
         r = _unwrap_if_constexpr(v)
         return r.handle if hasattr(r, 'handle') else _builder.get_int64(r)
@@ -318,13 +324,14 @@ def sme_gemm(ap_ptr, bp_ptr, c_ptr, Mp, Np, K4, _builder=None):
 
 
 @builtin
-def smmla_uk(ap_ptr, wp_ptr, c_ptr, xs_ptr, ws_ptr, K8, MP, N, mp0, np0, _builder=None):
+def smmla_uk(ap_ptr, wp_ptr, c_ptr, xs_ptr, ws_ptr, K8, MP, N, mp0, np0, _semantic=None):
     """TLE-Struct micro-kernel: one fixed 8x8 SMMLA output tile (the Raw leaf).
 
     The M/N tiling is orchestrated by the surrounding @triton.jit kernel (the
     Struct layer); this op computes ONE 8x8 register-blocked tile at (mp0, np0).
     Calls smmla_uk() in libTritonCPURuntime.
     """
+    _builder = _semantic.builder
     def _i64(v):
         r = _unwrap_if_constexpr(v)
         return r.handle if hasattr(r, 'handle') else _builder.get_int64(r)
@@ -340,44 +347,49 @@ def _i64(v, _builder):
 
 
 @builtin
-def sme_uk(ap, bp, c, K4, Np, mt, nt, _builder=None):
+def sme_uk(ap, bp, c, K4, Np, mt, nt, _semantic=None):
     """TLE-Struct micro-kernel: one 16x64 SME GEMM tile."""
+    _builder = _semantic.builder
     _builder.create_cpu_sme_uk(ap.handle, bp.handle, c.handle,
                                _i64(K4,_builder), _i64(Np,_builder), _i64(mt,_builder), _i64(nt,_builder))
     return None
 
 
 @builtin
-def sdot_gemv_uk(a, b, c, K4, N4, BN4, blk, _builder=None):
+def sdot_gemv_uk(a, b, c, K4, N4, BN4, blk, _semantic=None):
     """TLE-Struct micro-kernel: one block of the decode int8 GEMV."""
+    _builder = _semantic.builder
     _builder.create_cpu_sdot_gemv_uk(a.handle, b.handle, c.handle,
                                      _i64(K4,_builder), _i64(N4,_builder), _i64(BN4,_builder), _i64(blk,_builder))
     return None
 
 
 @builtin
-def swiglu_uk(gate, up, out, off, n, _builder=None):
+def swiglu_uk(gate, up, out, off, n, _semantic=None):
     """TLE-Struct micro-kernel: SwiGLU on one block."""
+    _builder = _semantic.builder
     _builder.create_cpu_swiglu_uk(gate.handle, up.handle, out.handle, _i64(off,_builder), _i64(n,_builder))
     return None
 
 
 @builtin
-def rmsnorm_uk(x, weight, out, D, row, _builder=None):
+def rmsnorm_uk(x, weight, out, D, row, _semantic=None):
     """TLE-Struct micro-kernel: RMSNorm on one row."""
+    _builder = _semantic.builder
     _builder.create_cpu_rmsnorm_uk(x.handle, weight.handle, out.handle, _i64(D,_builder), _i64(row,_builder))
     return None
 
 
 @builtin
-def residual_uk(residual, x, off, n, _builder=None):
+def residual_uk(residual, x, off, n, _semantic=None):
     """TLE-Struct micro-kernel: residual add on one block."""
+    _builder = _semantic.builder
     _builder.create_cpu_residual_uk(residual.handle, x.handle, _i64(off,_builder), _i64(n,_builder))
     return None
 
 
 @builtin
-def sdot(acc, a, b, _builder=None):
+def sdot(acc, a, b, _semantic=None):
     """NEON SDOT: 4-lane signed int8 dot product accumulate.
 
     acc: tensor([4], int32)  — accumulator
@@ -391,6 +403,7 @@ def sdot(acc, a, b, _builder=None):
 
     Lowered to: llvm.aarch64.neon.sdot.v4i32.v16i8 via TTC_NeonSdotOp.
     """
+    _builder = _semantic.builder
     return tensor(
         _builder.create_cpu_neon_sdot(acc.handle, a.handle, b.handle),
         acc.type,

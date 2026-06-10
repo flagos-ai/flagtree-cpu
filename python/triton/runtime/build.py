@@ -71,15 +71,15 @@ def _build(name: str, src: str, srcdir: str, library_dirs: list[str], include_di
     # Use dynamic lookup to load Python library on Mac
     if system == "Darwin":
         cc_cmd += ["-undefined", "dynamic_lookup"]
-        # Don't use libgcc on clang + macos
-        if "clang" in cc:
-            libraries.remove("gcc")
+        # macOS has no libgcc; /usr/bin/gcc is a clang shim, so the name check
+        # is not reliable -- drop it unconditionally on Darwin.
+        libraries.remove("gcc")
 
     cc_cmd += [_library_flag(lib) for lib in libraries]
     cc_cmd += [f"-L{dir}" for dir in library_dirs]
     cc_cmd += [f"-I{dir}" for dir in include_dirs if dir is not None]
     for dir in library_dirs:
-        cc_cmd.extend(["-Wl,-rpath", dir])
+        cc_cmd.extend(["-Wl,-rpath", str(dir)])  # may be a PathLike
     # CPU backend uses C++ (driver.cpp). Some old version compilers need a specific C++17 flag.
     if src.endswith(".cpp") or src.endswith(".cc"):
         cc_cmd += ["-std=c++17"]
@@ -101,8 +101,10 @@ def _build(name: str, src: str, srcdir: str, library_dirs: list[str], include_di
     if src.endswith(".s"):
         # This is required to properly parse .file directives
         cc_cmd += ["-g"]
-        if system == "Linux" and machine in ("aarch64", "arm64"):
-            # On Arm backend, some CPU (neoverse-v2) needs to be specified through -mcpu
+        if machine in ("aarch64", "arm64"):
+            # The .s was code-generated for THIS host by LLVM and may use host
+            # ISA extensions (i8mm/bf16); -mcpu=native lets the assembler
+            # accept them (Linux servers like neoverse-v2 and Apple Silicon).
             cc_cmd += ["-mcpu=native"]
     cc_cmd.extend(ccflags)
     subprocess.check_call(cc_cmd, stdout=subprocess.DEVNULL)
