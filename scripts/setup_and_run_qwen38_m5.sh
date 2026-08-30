@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Three-stage entry for the Mac17,9 CPU-only DFlash2 route:
-#   models -> environment -> local inference/benchmark.
+# Three-stage entry for Qwen3.8-27B CPU inference on Mac17,9:
+#   models -> environment -> no-spec or DFlash2 inference/benchmark.
 
-runtime_version="20260828"
+runtime_version="20260829"
 bundle_name="dflash2-m5-assets-${runtime_version}.tar.gz"
-bundle_sha256="91c07ada1a90a9709bb6b801a77e0d43a2a671d5b9ed0a44d8d4fd7877920c7a"
+bundle_sha256="8b9aa878c0bd519f72a91e5915b719c9b50f1d6b31d2135933071df0d0994489"
 bundle_url="${DFLASH2_RUNTIME_BUNDLE_URL:-https://github.com/kevinzs2048/flagtree-cpu/releases/download/dflash2-m5-runtime-${runtime_version}/${bundle_name}}"
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -78,7 +78,11 @@ prepare_runtime_bundle() {
     || die "runtime bundle is missing its checksum manifest"
   [[ -f "$staging/portable_env.sh" \
       && -f "$staging/qwen38_dflash2_generate.py" \
-      && -f "$staging/run_dflash2_benchmark_vllm024.sh" ]] \
+      && -f "$staging/run_dflash2_benchmark_vllm024.sh" \
+      && -f "$staging/run_dflash2_benchmark_portable.sh" \
+      && -f "$staging/qwen38_nospec_benchmark.py" \
+      && -f "$staging/run_nospec_benchmark_portable.sh" \
+      && -f "$staging/run_nospec_benchmark_vllm024.sh" ]] \
     || die "runtime bundle is missing launch helpers"
   touch "$staging/.dflash2-runtime-assets-$runtime_version"
   mv "$staging" "$runtime_payload_root"
@@ -87,12 +91,18 @@ prepare_runtime_bundle() {
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/setup_and_run_dflash2_m5.sh models
-  bash scripts/setup_and_run_dflash2_m5.sh env
-  bash scripts/setup_and_run_dflash2_m5.sh run "你的问题"
-  bash scripts/setup_and_run_dflash2_m5.sh benchmark
-  bash scripts/setup_and_run_dflash2_m5.sh all "你的问题"
-  bash scripts/setup_and_run_dflash2_m5.sh doctor
+  bash scripts/setup_and_run_qwen38_m5.sh models
+  bash scripts/setup_and_run_qwen38_m5.sh env
+  bash scripts/setup_and_run_qwen38_m5.sh run-nospec "你的问题"
+  bash scripts/setup_and_run_qwen38_m5.sh run-dflash2 "你的问题"
+  bash scripts/setup_and_run_qwen38_m5.sh benchmark-nospec
+  bash scripts/setup_and_run_qwen38_m5.sh benchmark-dflash2
+  bash scripts/setup_and_run_qwen38_m5.sh all "你的问题"
+  bash scripts/setup_and_run_qwen38_m5.sh doctor-nospec
+  bash scripts/setup_and_run_qwen38_m5.sh doctor-dflash2
+
+Compatibility aliases:
+  run, benchmark and doctor select the DFlash2 route.
 
 Model input:
   TARGET_REPO=FlagRelease/Qwen3.8-27B-W4A8-arm-FlagOS-Express
@@ -595,7 +605,12 @@ PY
   echo "Native ops: $flag_gems_lib"
 }
 
-doctor() {
+doctor_target() {
+  target_is_complete "$target_dir" || die "invalid or missing W4A8 packed target: $target_dir"
+  environment_doctor
+}
+
+doctor_dflash2() {
   target_is_complete "$target_dir" || die "invalid or missing W4A8 packed target: $target_dir"
   draft_is_complete "$draft_dir" || die "invalid or missing DFlash2 drafter: $draft_dir"
   environment_doctor
@@ -619,25 +634,46 @@ export_runtime() {
 }
 
 run_inference() {
-  doctor
+  local mode="$1"
+  shift
+  if [[ "$mode" == "dflash2" ]]; then
+    doctor_dflash2
+  else
+    doctor_target
+  fi
   export_runtime
   source "$runtime_payload_root/portable_env.sh"
+  export INFERENCE_MODE="$mode"
   exec "$python_bin" "$runtime_payload_root/qwen38_dflash2_generate.py" "$@"
 }
 
-run_benchmark() {
-  doctor
-  export_runtime
-  export DFLASH2_THREADS="${DFLASH2_THREADS:-14}"
+set_benchmark_defaults() {
   export BENCH_Q4_PREFILL_THREADS_OVERRIDE="${BENCH_Q4_PREFILL_THREADS_OVERRIDE:-18}"
   export BENCH_GDN_PREFILL_THREADS_OVERRIDE="${BENCH_GDN_PREFILL_THREADS_OVERRIDE:-18}"
   export BENCH_TOKENS="${BENCH_TOKENS:-325}"
   export BENCH_REPEATS="${BENCH_REPEATS:-3}"
   export MAX_MODEL_LEN="${MAX_MODEL_LEN:-$((BENCH_TOKENS + 99))}"
   export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((BENCH_TOKENS + 107))}"
+  export BENCH_PROMPT_MODE="${BENCH_PROMPT_MODE:-reasoning_math}"
   mkdir -p "$install_root/results"
-  export BENCH_RESULT_FILE="${BENCH_RESULT_FILE:-$install_root/results/m5_setup_entry_pp85_tg${BENCH_TOKENS}.json}"
+}
+
+run_benchmark_dflash2() {
+  doctor_dflash2
+  export_runtime
+  export DFLASH2_THREADS="${DFLASH2_THREADS:-14}"
+  set_benchmark_defaults
+  export BENCH_RESULT_FILE="${BENCH_RESULT_FILE:-$install_root/results/m5_dflash2_pp85_tg${BENCH_TOKENS}.json}"
   exec bash "$runtime_payload_root/run_dflash2_benchmark_vllm024.sh"
+}
+
+run_benchmark_nospec() {
+  doctor_target
+  export_runtime
+  export NOSPEC_THREADS="${NOSPEC_THREADS:-14}"
+  set_benchmark_defaults
+  export BENCH_RESULT_FILE="${BENCH_RESULT_FILE:-$install_root/results/m5_nospec_pp85_tg${BENCH_TOKENS}.json}"
+  exec bash "$runtime_payload_root/run_nospec_benchmark_vllm024.sh"
 }
 
 command_name="${1:-}"
@@ -654,23 +690,35 @@ case "$command_name" in
     prepare_runtime_bundle
     install_environment
     ;;
-  run)
+  run-nospec)
     prepare_runtime_bundle
-    run_inference "$@"
+    run_inference nospec "$@"
     ;;
-  benchmark)
+  run-dflash2|run)
     prepare_runtime_bundle
-    run_benchmark
+    run_inference dflash2 "$@"
+    ;;
+  benchmark-nospec)
+    prepare_runtime_bundle
+    run_benchmark_nospec
+    ;;
+  benchmark-dflash2|benchmark)
+    prepare_runtime_bundle
+    run_benchmark_dflash2
     ;;
   all)
     install_models
     prepare_runtime_bundle
     install_environment
-    run_inference "$@"
+    run_inference dflash2 "$@"
     ;;
-  doctor)
+  doctor-nospec)
     prepare_runtime_bundle
-    doctor
+    doctor_target
+    ;;
+  doctor-dflash2|doctor)
+    prepare_runtime_bundle
+    doctor_dflash2
     ;;
   -h|--help|help)
     usage
