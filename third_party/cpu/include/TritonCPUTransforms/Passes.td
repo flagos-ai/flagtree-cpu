@@ -75,6 +75,25 @@ def OptimizeMasks : Pass<"triton-cpu-optimize-masks", "mlir::ModuleOp"> {
                              "mlir::triton::cpu::TritonCPUDialect"];
 }
 
+def MarkWideBf16StoresVolatile
+    : Pass<"triton-cpu-mark-wide-bf16-stores-volatile", "mlir::ModuleOp"> {
+    let summary = "Prevent AArch64 from pairing 256-bit BF16 stores.";
+    let description = [{
+        Marks exactly vector<16xbf16> LLVM stores in CFG cycles volatile when
+        the same block does not load from the store address.  On Cortex-A720,
+        LLVM's two-register STP selection for such independent-output stores
+        can create a severe cross-iteration low-address store/load false
+        dependency.  Volatile preserves two STR operations without changing
+        the computed values.  The CPU backend enables this pass only for
+        affected microarchitectures.
+    }];
+
+    let constructor =
+        "mlir::triton::cpu::createMarkWideBf16StoresVolatile()";
+
+    let dependentDialects = ["mlir::LLVM::LLVMDialect"];
+}
+
 def ConvertDotProduct : Pass<"triton-cpu-convert-dot-product", "mlir::ModuleOp"> {
     let summary = "Convert dot product op.";
     let description = [{
@@ -87,6 +106,12 @@ def ConvertDotProduct : Pass<"triton-cpu-convert-dot-product", "mlir::ModuleOp">
         Option<"useHorizontalSum", "use-horizontal-sum",
                "bool", /*default*/"true",
                "Use Horizontal Sum kernel for the dot product (gemv). Otherwise use a kernel with packing.">,
+        Option<"enableBf16", "enable-bf16",
+               "bool", /*default*/"true",
+               "Enable Arm BF16 dot-product pattern conversion.">,
+        Option<"enableI8", "enable-i8",
+               "bool", /*default*/"true",
+               "Enable Arm signed-int8 dot-product pattern conversion.">,
     ];
 
     let constructor = "mlir::triton::cpu::createConvertDotProduct()";
@@ -121,6 +146,30 @@ def ConvertDotToAMX : Pass<"triton-cpu-convert-dot-to-amx", "mlir::ModuleOp"> {
     let dependentDialects = ["mlir::arith::ArithDialect",
                              "mlir::vector::VectorDialect",
                              "mlir::x86::X86Dialect",
+                             "mlir::triton::TritonDialect",
+                             "mlir::triton::cpu::TritonCPUDialect"];
+}
+
+def ConvertDotToSVE2I8MM
+    : Pass<"triton-cpu-convert-dot-to-sve2-i8mm", "mlir::ModuleOp"> {
+    let summary = "Convert eligible AArch64 int8 dot ops to rolled microkernels.";
+    let description = [{
+        This pass lowers descriptor-backed int8 dot operations to rolled SVE2
+        i8mm microkernels. Its fixed-only mode runs M1 SDOT and packed Q4/Q8
+        recognizers, lowering them to fixed-width NEON SDOT/SMMLA.
+    }];
+
+    let options = [
+        Option<"fixedOnly", "fixed-only",
+               "bool", /*default*/"false",
+               "Only run fixed-width M1/Q4/Q8 SDOT/SMMLA fusions.">,
+    ];
+
+    let constructor = "mlir::triton::cpu::createConvertDotToSVE2I8MM()";
+
+    let dependentDialects = ["mlir::arith::ArithDialect",
+                             "mlir::vector::VectorDialect",
+                             "mlir::LLVM::LLVMDialect",
                              "mlir::triton::TritonDialect",
                              "mlir::triton::cpu::TritonCPUDialect"];
 }

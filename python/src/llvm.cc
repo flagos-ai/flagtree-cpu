@@ -807,8 +807,8 @@ void init_triton_llvm(py::module &&m) {
 
   m.def(
       "translate_to_host_asm",
-      [](std::string llvmIR, bool enable_fp_fusion,
-         bool enable_fast_math) -> py::object {
+      [](std::string llvmIR, bool enable_fp_fusion, bool enable_fast_math,
+         std::string features) -> py::object {
         std::string res;
         {
           // when allow_threads goes out of scope, gil will be released
@@ -826,13 +826,14 @@ void init_triton_llvm(py::module &&m) {
                 "lineno: " + std::to_string(error.getLineNo()));
           }
           auto triple = getDefaultTargerOrProcessTriple();
-          res = translateLLVMIRToASM(*module, triple,
-                                     llvm::sys::getHostCPUName().str(), "", {},
-                                     enable_fp_fusion, false, enable_fast_math);
+          res = translateLLVMIRToASM(
+              *module, triple, llvm::sys::getHostCPUName().str(), features, {},
+              enable_fp_fusion, false, enable_fast_math);
         }
         return py::str(res);
       },
-      ret::take_ownership);
+      ret::take_ownership, py::arg("llvmIR"), py::arg("enable_fp_fusion"),
+      py::arg("enable_fast_math"), py::arg("features") = "");
 
   m.def(
       "translate_to_bc",

@@ -14,7 +14,10 @@ from lit.llvm.subst import ToolSubst
 # name: The name of this test suite
 config.name = 'TRITON'
 
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+# LLVM 23 rejects implicit external-shell execution. TritonCPU tests use the
+# portable lit shell, which is also supported by the older lit release used by
+# the Triton 3.7 development environment.
+config.test_format = lit.formats.ShTest(execute_external=False)
 
 # suffixes: A list of file extensions to treat as test files.
 config.suffixes = ['.mlir', '.ll']

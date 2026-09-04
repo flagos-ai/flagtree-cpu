@@ -108,10 +108,15 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
   m.def("add_optimize_masks", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createOptimizeMasks());
   });
-  m.def("add_convert_dot_product", [](mlir::PassManager &pm,
-                                      bool useHorizontalSum) {
-    pm.addPass(mlir::triton::cpu::createConvertDotProduct(useHorizontalSum));
+  m.def("add_mark_wide_bf16_stores_volatile", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::cpu::createMarkWideBf16StoresVolatile());
   });
+  m.def("add_convert_dot_product",
+        [](mlir::PassManager &pm, bool useHorizontalSum, bool enableBf16,
+           bool enableI8) {
+          pm.addPass(mlir::triton::cpu::createConvertDotProduct(
+              useHorizontalSum, enableBf16, enableI8));
+        });
   m.def("add_loop_invariant_code_motion", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createLoopInvariantCodeMotionPass());
   });
@@ -124,6 +129,10 @@ void init_triton_cpu_passes_ttcpuir(py::module &&m) {
     pm.addPass(mlir::triton::cpu::createConvertDotToAMX(
         convertInt8, convertFp16, convertBf16));
   });
+  m.def("add_convert_dot_to_sve2_i8mm",
+        [](mlir::PassManager &pm, bool fixedOnly) {
+          pm.addPass(mlir::triton::cpu::createConvertDotToSVE2I8MM(fixedOnly));
+        });
   m.def("add_convert_dot_to_fma", [](mlir::PassManager &pm) {
     pm.addPass(mlir::triton::cpu::createConvertDotToFMA());
   });

@@ -73,6 +73,13 @@ template <typename OpTy> struct ScalariztionFunctor {
     auto def = vals.getDefiningOp<OpTy>();
     OperationState newState(def->getLoc(), def->getName());
     for (auto operand : def->getOperands()) {
+      // Scalar operands, including enclosing-loop induction variables, are
+      // already scalar and can be forwarded directly. Only shaped operands
+      // need recursive element extraction.
+      if (!isa<ShapedType>(operand.getType())) {
+        newState.operands.push_back(operand);
+        continue;
+      }
       newState.operands.push_back(computeScalarValue(
           operand.getDefiningOp(), operand, indices, rewriter));
     }
@@ -96,6 +103,8 @@ struct TritonOpScalarizeInterface
                                                OpTy> {
   bool canComputeScalarValue(Operation *op, Value vals) const {
     for (auto operand : op->getOperands()) {
+      if (!isa<ShapedType>(operand.getType()))
+        continue;
       if (isa<BlockArgument>(operand)) {
         return false;
       }

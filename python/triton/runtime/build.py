@@ -49,7 +49,13 @@ def _find_compiler(language: str) -> str:
             return cc
         clang = shutil.which("clang")
         gcc = shutil.which("gcc")
-        cc = gcc if gcc is not None else clang
+        # /usr/bin/gcc is an Apple Clang compatibility driver on Darwin. Use
+        # the explicit clang path so the Darwin linker branch does not mistake
+        # it for GNU GCC and add the unavailable libgcc runtime.
+        if platform.system() == "Darwin":
+            cc = clang if clang is not None else gcc
+        else:
+            cc = gcc if gcc is not None else clang
         if cc is not None:
             return cc
         raise RuntimeError(
@@ -62,7 +68,10 @@ def _find_compiler(language: str) -> str:
 
     clangxx = shutil.which("clang++")
     gxx = shutil.which("g++")
-    cxx = gxx if gxx is not None else clangxx
+    if platform.system() == "Darwin":
+        cxx = clangxx if clangxx is not None else gxx
+    else:
+        cxx = gxx if gxx is not None else clangxx
     if cxx is not None:
         return cxx
 
@@ -137,7 +146,8 @@ def _build(name: str, src: str, srcdir: str, library_dirs: list[str], include_di
         # This is required to properly parse .file directives
         cc_cmd += ["-g"]
         if system == "Linux" and machine in ("aarch64", "arm64"):
-            # On Arm backend, some CPU (neoverse-v2) needs to be specified through -mcpu
+            # Native AArch64 assembly may use host-supported instructions that
+            # are not enabled by the assembler's generic target.
             cc_cmd += ["-mcpu=native"]
     cc_cmd.extend(ccflags)
     subprocess.check_call(cc_cmd, stdout=subprocess.DEVNULL)

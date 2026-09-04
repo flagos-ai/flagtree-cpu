@@ -7,6 +7,7 @@ from pathlib import Path
 
 import triton
 
+from triton.runtime import build
 from triton.runtime.build import compile_module_from_src
 
 TEST_MODULE_C = """
@@ -89,3 +90,30 @@ def test_compile_module_bad_cache(fresh_knobs):
 
         assert mod.go("huh") == "huh"
         assert mod.go("hello") == "hiya"
+
+
+@pytest.mark.parametrize(
+    ("system", "language", "expected"),
+    (
+        ("Darwin", "c", "/usr/bin/clang"),
+        ("Darwin", "c++", "/usr/bin/clang++"),
+        ("Linux", "c", "/usr/bin/gcc"),
+        ("Linux", "c++", "/usr/bin/g++"),
+    ),
+)
+def test_find_compiler_uses_platform_default(monkeypatch, system, language, expected):
+    compilers = {
+        "clang": "/usr/bin/clang",
+        "gcc": "/usr/bin/gcc",
+        "clang++": "/usr/bin/clang++",
+        "g++": "/usr/bin/g++",
+    }
+    monkeypatch.setattr(build.platform, "system", lambda: system)
+    monkeypatch.setattr(build.shutil, "which", compilers.get)
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.delenv("CXX", raising=False)
+    build._find_compiler.cache_clear()
+    try:
+        assert build._find_compiler(language) == expected
+    finally:
+        build._find_compiler.cache_clear()

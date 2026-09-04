@@ -51,7 +51,7 @@ def _discover_backends() -> dict[str, Backend]:
                 continue
             compiler = importlib.import_module(f"triton.backends.{name}.compiler")
             driver = importlib.import_module(f"triton.backends.{name}.driver")
-            backends[name] = Backend(_find_concrete_subclasses(compiler, BaseBackend),
+            backends[name] = Backend(name, _find_concrete_subclasses(compiler, BaseBackend),
                                      _find_concrete_subclasses(driver, DriverBase))
         return backends
 

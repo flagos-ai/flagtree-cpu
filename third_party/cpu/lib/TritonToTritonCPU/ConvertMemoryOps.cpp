@@ -184,6 +184,57 @@ struct LoadOpConversion : public MemoryOpConversion<triton::LoadOp> {
         dyn_cast<VectorType>(getTypeConverter()->convertType(loadOp.getType()));
     auto shape = vecTy.getShape();
 
+    // Preserve one 2-D descriptor for direct, unmasked int8 dot operands.
+    // The generic path below creates an independent memref for every row,
+    // erasing the base/stride relation needed by a compact rolled target
+    // microkernel.
+    if (shape.size() == 2 && vecTy.getElementType().isInteger(8) &&
+        !loadOp.getMask() && loadOp.getResult().hasOneUse() &&
+        isa<triton::DotOp>(*loadOp.getResult().user_begin())) {
+      Value ptrTensor = loadOp.getPtr();
+      if (canComputeScalarValue(ptrTensor)) {
+        SmallVector<int64_t> origin{0, 0};
+        SmallVector<int64_t> nextRow{1, 0};
+        Value firstPtr = extractScalarPointer(loc, ptrTensor, origin, rewriter);
+        Value nextRowPtr =
+            extractScalarPointer(loc, ptrTensor, nextRow, rewriter);
+        Value firstAddr = triton::PtrToIntOp::create(
+            rewriter, loc, rewriter.getI64Type(), firstPtr);
+        Value nextRowAddr = triton::PtrToIntOp::create(
+            rewriter, loc, rewriter.getI64Type(), nextRowPtr);
+        Value majorStride =
+            arith::SubIOp::create(rewriter, loc, nextRowAddr, firstAddr);
+        if (!majorStride.getType().isIndex())
+          majorStride = arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getIndexType(), majorStride);
+
+        auto baseMemRefTy = MemRefType::get({1}, vecTy.getElementType());
+        Value baseMemRef = triton::cpu::PtrToMemRefOp::create(
+            rewriter, loc, baseMemRefTy, firstPtr);
+        auto layout =
+            StridedLayoutAttr::get(getContext(), 0, {ShapedType::kDynamic, 1});
+        auto tileMemRefTy =
+            MemRefType::get(shape, vecTy.getElementType(), layout);
+        SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(shape[0]),
+                                        rewriter.getIndexAttr(shape[1])};
+        SmallVector<OpFoldResult> tileStrides{majorStride,
+                                              rewriter.getIndexAttr(1)};
+        Value tileMemRef = memref::ReinterpretCastOp::create(
+            rewriter, loc, tileMemRefTy, baseMemRef, rewriter.getIndexAttr(0),
+            sizes, tileStrides);
+
+        Value zeroIdx = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        SmallVector<Value> indices(2, zeroIdx);
+        SmallVector<bool> inBounds(2, true);
+        Value vecRead = vector::TransferReadOp::create(
+            rewriter, loc, vecTy, tileMemRef, indices,
+            arith::getZeroConstant(rewriter, loc, vecTy.getElementType()),
+            inBounds);
+        rewriter.replaceOp(loadOp, vecRead);
+        return success();
+      }
+    }
+
     auto strides = computeStrides(shape);
     int64_t numElems = vecTy.getNumElements();
     Type subVecTy = VectorType::get(shape.back(), vecTy.getElementType());
@@ -348,6 +399,59 @@ struct StoreOpConversion : public MemoryOpConversion<triton::StoreOp> {
     auto vals = rewriter.getRemappedValue(storeOp.getValue());
     auto vecTy = dyn_cast<VectorType>(vals.getType());
     auto shape = vecTy.getShape();
+
+    // Keep a direct, unmasked rank-2 dot result as one strided descriptor.
+    // Besides avoiding one memref per output row, this lets target dot
+    // lowerings write their microtiles to the final destination without
+    // materializing the complete result vector through a stack buffer.
+    if (shape.size() == 2 && vecTy.getElementType().isInteger(32) &&
+        !storeOp.getMask() &&
+        storeOp.getValue().getDefiningOp<triton::DotOp>()) {
+      Value ptrTensor = storeOp.getPtr();
+      if (canComputeScalarValue(ptrTensor)) {
+        SmallVector<int64_t> origin{0, 0};
+        SmallVector<int64_t> nextRow{1, 0};
+        Value firstPtr = extractScalarPointer(loc, ptrTensor, origin, rewriter);
+        Value nextRowPtr =
+            extractScalarPointer(loc, ptrTensor, nextRow, rewriter);
+        Value firstAddr = triton::PtrToIntOp::create(
+            rewriter, loc, rewriter.getI64Type(), firstPtr);
+        Value nextRowAddr = triton::PtrToIntOp::create(
+            rewriter, loc, rewriter.getI64Type(), nextRowPtr);
+        Value majorStride =
+            arith::SubIOp::create(rewriter, loc, nextRowAddr, firstAddr);
+        // Pointer differences are in bytes; memref strides are in elements.
+        Value elementBytes = arith::ConstantIntOp::create(
+            rewriter, loc, rewriter.getI64Type(), 4);
+        majorStride =
+            arith::DivSIOp::create(rewriter, loc, majorStride, elementBytes);
+        majorStride = arith::IndexCastOp::create(
+            rewriter, loc, rewriter.getIndexType(), majorStride);
+
+        auto baseMemRefTy = MemRefType::get({1}, vecTy.getElementType());
+        Value baseMemRef = triton::cpu::PtrToMemRefOp::create(
+            rewriter, loc, baseMemRefTy, firstPtr);
+        auto layout =
+            StridedLayoutAttr::get(getContext(), 0, {ShapedType::kDynamic, 1});
+        auto tileMemRefTy =
+            MemRefType::get(shape, vecTy.getElementType(), layout);
+        SmallVector<OpFoldResult> sizes{rewriter.getIndexAttr(shape[0]),
+                                        rewriter.getIndexAttr(shape[1])};
+        SmallVector<OpFoldResult> tileStrides{majorStride,
+                                              rewriter.getIndexAttr(1)};
+        Value tileMemRef = memref::ReinterpretCastOp::create(
+            rewriter, loc, tileMemRefTy, baseMemRef, rewriter.getIndexAttr(0),
+            sizes, tileStrides);
+
+        Value zeroIdx = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        SmallVector<Value> indices(2, zeroIdx);
+        SmallVector<bool> inBounds(2, true);
+        vector::TransferWriteOp::create(rewriter, loc, vals, tileMemRef,
+                                        indices, inBounds);
+        rewriter.eraseOp(storeOp);
+        return success();
+      }
+    }
 
     auto strides = computeStrides(shape);
     int64_t numElems = vecTy.getNumElements();

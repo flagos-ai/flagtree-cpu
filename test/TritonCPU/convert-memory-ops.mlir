@@ -1,4 +1,5 @@
 // RUN: triton-opt %s -split-input-file -triton-cpu-convert-memory-ops=use-gather-scatter=true -cse | FileCheck %s
+// RUN: triton-opt %s -split-input-file -triton-cpu-mark-wide-bf16-stores-volatile | FileCheck %s --check-prefix=A720
 
 // Convert strided masked loads to gather.
 
@@ -23,6 +24,57 @@ module {
       tt.store %4, %5 : tensor<32x!tt.ptr<i32>>
     }
     tt.return
+  }
+}
+
+// -----
+
+// An in-place loop loads and stores the same SSA address, so it must retain a
+// normal store.  This keeps RoPE-style kernels out of the A720 workaround.
+
+// A720-LABEL: llvm.func @keep_in_place_store
+// A720:       %[[VALUE:.*]] = llvm.load %[[PTR:.*]] : !llvm.ptr -> vector<16xbf16>
+// A720-NEXT:  llvm.store %[[VALUE]], %[[PTR]] : vector<16xbf16>, !llvm.ptr
+// A720-NOT:   llvm.store volatile
+
+module {
+  llvm.func @keep_in_place_store(%ptr: !llvm.ptr, %condition: i1) {
+    llvm.br ^loop
+  ^loop:
+    %value = llvm.load %ptr : !llvm.ptr -> vector<16xbf16>
+    llvm.store %value, %ptr : vector<16xbf16>, !llvm.ptr
+    llvm.cond_br %condition, ^loop, ^exit
+  ^exit:
+    llvm.return
+  }
+}
+
+// -----
+
+// The A720 workaround is deliberately exact: only a fixed 16-lane BF16 store
+// in a loop becomes volatile.  Neighboring widths, element types, and the same
+// wide store outside a loop retain ordinary LLVM memory semantics.
+
+// A720-LABEL: llvm.func @mark_only_wide_bf16
+// A720:       llvm.store volatile %{{.*}}, %{{.*}} : vector<16xbf16>, !llvm.ptr
+// A720:       llvm.store %{{.*}}, %{{.*}} : vector<8xbf16>, !llvm.ptr
+// A720:       llvm.store %{{.*}}, %{{.*}} : vector<16xf16>, !llvm.ptr
+// A720:       llvm.store %{{.*}}, %{{.*}} : vector<16xbf16>, !llvm.ptr
+
+module {
+  llvm.func @mark_only_wide_bf16(
+      %ptr0: !llvm.ptr, %ptr1: !llvm.ptr, %ptr2: !llvm.ptr,
+      %wide: vector<16xbf16>, %narrow: vector<8xbf16>,
+      %fp16: vector<16xf16>, %condition: i1) {
+    llvm.br ^loop
+  ^loop:
+    llvm.store %wide, %ptr0 : vector<16xbf16>, !llvm.ptr
+    llvm.store %narrow, %ptr1 : vector<8xbf16>, !llvm.ptr
+    llvm.store %fp16, %ptr2 : vector<16xf16>, !llvm.ptr
+    llvm.cond_br %condition, ^loop, ^exit
+  ^exit:
+    llvm.store %wide, %ptr0 : vector<16xbf16>, !llvm.ptr
+    llvm.return
   }
 }
 

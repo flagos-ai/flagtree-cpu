@@ -1807,6 +1807,14 @@ void init_triton_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value &val) -> Value {
              return self.create<math::TruncOp>(val);
            })
+      .def("create_round",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::RoundOp>(val);
+           })
+      .def("create_round_even",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::RoundEvenOp>(val);
+           })
       .def("create_reduce",
            [](TritonOpBuilder &self, std::vector<Value> operands, int axis)
                -> OpState { return self.create<ReduceOp>(operands, axis); })

@@ -130,6 +130,18 @@ def trunc(arg0, _semantic=None):
 
 
 @core.extern
+def round(arg0, _semantic=None):
+    """Round to nearest integer, resolving ties away from zero."""
+    return core.tensor(_semantic.builder.create_round(arg0.handle), arg0.type)
+
+
+@core.extern
+def rint(arg0, _semantic=None):
+    """Round to nearest integer, resolving ties to an even integer."""
+    return core.tensor(_semantic.builder.create_round_even(arg0.handle), arg0.type)
+
+
+@core.extern
 def ceil(arg0, _semantic=None):
     return core.extern_elementwise(
         "", "", [arg0], {

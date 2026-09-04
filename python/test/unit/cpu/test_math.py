@@ -93,7 +93,7 @@ def test_tensor_math_fn(vec_lib, dtype_str, math_fn, size, device):
 @pytest.mark.parametrize("math_fn", [
     "acos", "acosh", "asin", "asinh", "atan", "atanh", "cbrt", "ceil", "cos", "cosh", "erf", "exp", "exp2", "expm1",
     "floor", "fmod", "isnan", "isinf", "log", "log1p", "log2", "log10", "pow", "rsqrt", "signbit", "sin", "sinh",
-    "sqrt", "tan", "tanh", "trunc"
+    "rint", "round", "sqrt", "tan", "tanh", "trunc"
 ])
 def test_libdevice_math_fn(vec_lib, dtype_str, math_fn, size, device):
     if not is_cpu():
@@ -139,6 +139,11 @@ def test_libdevice_math_fn(vec_lib, dtype_str, math_fn, size, device):
     # Generate reference output
     if math_fn == "cbrt":
         ref = inputs[0].pow(1 / 3)
+    elif math_fn == "rint":
+        ref = inputs[0].round()
+    elif math_fn == "round":
+        magnitude = inputs[0].abs()
+        ref = (magnitude.floor() + (magnitude % 1 >= 0.5)).copysign(inputs[0])
     else:
         ref = getattr(inputs[0], math_fn)(*inputs[1:])
 
@@ -152,8 +157,8 @@ def test_libdevice_math_fn(vec_lib, dtype_str, math_fn, size, device):
 
     # These are not implemented via extern library calls
     native_impls = {
-        "libmvec": {"expm1", "floor", "isnan", "isinf", "rsqrt", "signbit", "sqrt", "trunc"},
-        "libsleef": {"isnan", "isinf", "rsqrt", "signbit"},
+        "libmvec": {"expm1", "floor", "isnan", "isinf", "rint", "round", "rsqrt", "signbit", "sqrt", "trunc"},
+        "libsleef": {"isnan", "isinf", "rint", "round", "rsqrt", "signbit"},
     }
     # These are always implemented with extern library calls
     always_extern = {"ceil", "fmod", "pow"}
@@ -161,3 +166,49 @@ def test_libdevice_math_fn(vec_lib, dtype_str, math_fn, size, device):
         check_num_vec_calls(meta, vec_lib, dtype_str, size, is_always_extern=math_fn in always_extern)
     else:
         assert meta.asm["asm"].count(lib_prefix[vec_lib]) == 0
+
+
+@pytest.mark.cpu
+def test_round_away_to_i32_codegen(device):
+    """Ties-away semantics must remain native when consumed as an integer."""
+    if not is_cpu():
+        pytest.skip("This test is CPU-specific")
+
+    @triton.jit
+    def kernel(src, dst, BLOCK_SIZE: tl.constexpr):
+        offsets = tl.arange(0, BLOCK_SIZE)
+        values = tl.load(src + offsets)
+        rounded = libdevice.round(values).to(tl.int32)
+        tl.store(dst + offsets, rounded)
+
+    source = torch.tensor(
+        [
+            -4.5,
+            -3.5,
+            -2.5001,
+            -2.5,
+            -2.4999,
+            -1.5,
+            -0.5,
+            -0.4999,
+            0.0,
+            0.4999,
+            0.5,
+            1.5,
+            2.4999,
+            2.5,
+            2.5001,
+            3.5,
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+    result = torch.empty(source.shape, dtype=torch.int32, device=device)
+    meta = kernel[(1, )](source, result, BLOCK_SIZE=source.numel())
+    magnitude = source.abs()
+    reference = ((magnitude.floor() + (magnitude % 1 >= 0.5)).copysign(source).to(torch.int32))
+    torch.testing.assert_close(result, reference, rtol=0, atol=0)
+    assembly = meta.asm["asm"].lower()
+    assert "sleef" not in assembly
+    if arch in {"aarch64", "arm64"}:
+        assert "fcvtas" in assembly
