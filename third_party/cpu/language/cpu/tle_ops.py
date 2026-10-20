@@ -21,6 +21,21 @@ def raw_call(symbol, *args, result_dtype=core.int32, _semantic=None):
     explicit integer/float widths. Set result_dtype=None for a void function.
     This call is retained when its result is unused.
 
+    Kernels used as native single-program leaves may request the CPU compiler
+    option ``enable_single_program_entry=True``. The additional symbol in
+    ``compiled.metadata.single_program_name`` accepts only kernel arguments;
+    it fixes program IDs to zero and all grid dimensions to one. The ordinary
+    compiled entry and Triton launch interface keep their full grid ABI.
+
+    With ``single_program_return_type="i32"`` (also i64/f32/f64), the additional
+    C entry omits the kernel's final output pointer and returns that scalar.
+    After inlining, the kernel may only store matching scalar values directly
+    through that pointer. Pointer arithmetic, loads, tensor stores and escape
+    are rejected before lowering. Its temporary
+    storage starts at zero. The ordinary launcher still takes the original
+    output pointer. LLVM can promote the temporary to an SSA return value,
+    avoiding a status-buffer store/load around a scalar native call.
+
     CPU ``extern_libs={name: bitcode_path}`` can link leaves from LLVM bitcode
     before optimization. Use a compatible LLVM toolchain, host architecture,
     target features and C ABI. Compile shared-object leaves with ``-fPIC``;

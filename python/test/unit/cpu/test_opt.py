@@ -86,17 +86,101 @@ def test_vec_cdiv(device):
     kernel[(1, )](arg0, arg1)
 
 
-def test_cpu_raw_call_rejects_block_arguments():
-    from triton.language.extra.cpu.tle_ops import raw_call
-    from triton.compiler.errors import CompilationError
+@pytest.mark.parametrize("enabled", [False, True])
+def test_single_program_c_entry_preserves_grid_launcher(enabled):
+    import ctypes
 
     @triton.jit
-    def kernel(out):
-        value = raw_call("not_reached", tl.arange(0, 4))
+    def kernel(out, value):
+        x, y, z = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+        nx, ny, nz = tl.num_programs(0), tl.num_programs(1), tl.num_programs(2)
+        tl.store(out + x + nx * (y + ny * z), value + 100 * nx + 10 * ny + nz)
+
+    output = torch.full((8,), -1, dtype=torch.int32)
+    # Warmup exports metadata but never executes the kernel.
+    compiled = kernel.warmup(output, 7, grid=(2, 2, 2), enable_single_program_entry=enabled)
+    assert torch.equal(output, torch.full_like(output, -1))
+    entry_name = getattr(compiled.metadata, "single_program_name", None)
+    if enabled:
+        assert entry_name == compiled.name + "__single_program"
+        library = ctypes.CDLL(compiled.metadata_group[compiled.name + ".so"])
+        entry = getattr(library, entry_name)
+        entry.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+        entry.restype = None
+        entry(output.data_ptr(), 7)
+        assert output.tolist() == [118, -1, -1, -1, -1, -1, -1, -1]
+    else:
+        assert entry_name is None
+    # Enabling the extra entry must not specialize the ordinary grid to one.
+    kernel[(2, 2, 2)](output, 7, enable_single_program_entry=enabled)
+    assert output.tolist() == [229] * 8
+
+
+@pytest.mark.parametrize("kind,dtype,ctype", [
+    ("i32", torch.int32, "c_int32"), ("i64", torch.int64, "c_int64"),
+    ("f32", torch.float32, "c_float"), ("f64", torch.float64, "c_double"),
+])
+def test_single_program_c_scalar_return(kind, dtype, ctype):
+    import ctypes
+
+    @triton.jit
+    def kernel(out, value, result):
+        tl.store(out + tl.program_id(0), value * 2)
+        tl.store(result, value + 3)
+
+    output = torch.full((2,), -1, dtype=torch.int32)
+    result = torch.full((1,), -1, dtype=dtype)
+    compiled = kernel.warmup(output, 7, result, grid=(1,),
+                             enable_single_program_entry=True,
+                             single_program_return_type=kind)
+    library = ctypes.CDLL(compiled.metadata_group[compiled.name + ".so"])
+    entry = getattr(library, compiled.metadata.single_program_name)
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    entry.restype = getattr(ctypes, ctype)
+    assert entry(output.data_ptr(), 7) == 10
+    assert output.tolist() == [14, -1]
+    assert result.item() == -1  # No result pointer crosses the additional C ABI.
+    kernel[(2,)](output, 7, result, enable_single_program_entry=True,
+                 single_program_return_type=kind)
+    assert output.tolist() == [14, 14]
+    assert result.item() == 10
+
+
+def test_single_program_scalar_return_rejects_invalid_abi():
+    from triton.backends.cpu.compiler import CPUOptions
+
+    with pytest.raises(ValueError, match="return type"):
+        CPUOptions(enable_single_program_entry=True, single_program_return_type="i8")
+    with pytest.raises(ValueError, match="requires"):
+        CPUOptions(single_program_return_type="i32")
+
+    @triton.jit
+    def kernel(out, value):
         tl.store(out, value)
 
-    with pytest.raises(CompilationError, match="scalar integers or floats"):
-        kernel.warmup(torch.empty(1, dtype=torch.int32), grid=(1,))
+    with pytest.raises(RuntimeError, match="final output pointer"):
+        kernel.warmup(torch.empty(1, dtype=torch.int32), 7, grid=(1,),
+                      enable_single_program_entry=True, single_program_return_type="i32")
+
+
+@pytest.mark.parametrize("case", ["type", "offset", "vector", "escape"])
+def test_single_program_scalar_return_rejects_unsafe_output(case):
+    @triton.jit
+    def kernel(out, result, CASE: tl.constexpr):
+        if CASE == "offset":
+            tl.store(result + 1, 7)
+        elif CASE == "vector":
+            tl.store(result + tl.arange(0, 4), 7)
+        elif CASE == "escape":
+            tl.store(out, result.to(tl.uint64))
+        else:
+            tl.store(result, 7)
+
+    dtype = torch.float32 if case == "type" else torch.int32
+    with pytest.raises(RuntimeError, match="Scalar C return"):
+        kernel.warmup(torch.empty(1, dtype=torch.int64), torch.empty(4, dtype=dtype), case,
+                      grid=(1,), enable_single_program_entry=True,
+                      single_program_return_type="i32")
 
 
 @pytest.mark.parametrize("kind,dtype", [("f32", torch.float32), ("f64", torch.float64)])
@@ -122,6 +206,19 @@ def test_cpu_raw_call_float_and_void_abi(tmp_path, kind, dtype):
     kernel[(1,)](x, out, tl.float32 if kind == "f32" else tl.float64,
                   extern_libs={"leaf": str(leaf)})
     assert out.item() == 2.25
+
+
+def test_cpu_raw_call_rejects_block_arguments():
+    from triton.language.extra.cpu.tle_ops import raw_call
+    from triton.compiler.errors import CompilationError
+
+    @triton.jit
+    def kernel(out):
+        value = raw_call("not_reached", tl.arange(0, 4))
+        tl.store(out, value)
+
+    with pytest.raises(CompilationError, match="scalar integers or floats"):
+        kernel.warmup(torch.empty(1, dtype=torch.int32), grid=(1,))
 
 
 def test_cpu_external_ir_link_and_disk_cache_invalidation(tmp_path):
