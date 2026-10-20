@@ -182,6 +182,23 @@ def test_arm_assembler_flags_select_host_compatible_isa(monkeypatch):
     assert not backend.use_fixed_i8mm()
 
 
+def test_darwin_assembler_flags_preserve_cpu_when_features_unavailable(monkeypatch):
+    backend = object.__new__(CPUBackend)
+    backend.cpu_arch = "arm64"
+    backend.cpu_name = "apple-m4"
+    backend.cpu_features = {"neon"}
+    backend.sve_vector_bits = 0
+    monkeypatch.setattr(cpu_compiler.platform, "system", lambda: "Darwin")
+    assert backend.arm_assembler_flags() == ["-mcpu=apple-m4"]
+
+    backend.cpu_name = "generic"
+    assert backend.arm_assembler_flags() == []
+
+    backend.cpu_name = "apple-m4"
+    monkeypatch.setattr(cpu_compiler.platform, "system", lambda: "Linux")
+    assert backend.arm_assembler_flags() == []
+
+
 @pytest.mark.parametrize("sve_vector_bits", (0, 128))
 def test_streaming_features_are_not_implicitly_enabled(monkeypatch, sve_vector_bits):
     backend = object.__new__(CPUBackend)
