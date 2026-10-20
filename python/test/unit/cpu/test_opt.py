@@ -97,3 +97,90 @@ def test_cpu_raw_call_rejects_block_arguments():
 
     with pytest.raises(CompilationError, match="scalar integers or floats"):
         kernel.warmup(torch.empty(1, dtype=torch.int32), grid=(1,))
+
+
+@pytest.mark.parametrize("kind,dtype", [("f32", torch.float32), ("f64", torch.float64)])
+def test_cpu_raw_call_float_and_void_abi(tmp_path, kind, dtype):
+    from triton.language.extra.cpu.tle_ops import raw_call
+
+    llvm_type = "float" if kind == "f32" else "double"
+    leaf = tmp_path / "float_leaf.ll"
+    leaf.write_text(
+        f"define {llvm_type} @cpu_raw_add({llvm_type} %x) {{\n"
+        f" %y = fadd {llvm_type} %x, 1.000000e+00\n ret {llvm_type} %y\n}}\n"
+        f"define void @cpu_raw_store(i64 %address, {llvm_type} %x) {{\n"
+        f" %out = inttoptr i64 %address to ptr\n store {llvm_type} %x, ptr %out\n ret void\n}}\n"
+    )
+
+    @triton.jit
+    def kernel(input, out, TYPE: tl.constexpr):
+        value = raw_call("cpu_raw_add", tl.load(input).to(TYPE), result_dtype=TYPE)
+        raw_call("cpu_raw_store", out.to(tl.uint64), value, result_dtype=None)
+
+    x = torch.tensor([1.25], dtype=dtype)
+    out = torch.zeros_like(x)
+    kernel[(1,)](x, out, tl.float32 if kind == "f32" else tl.float64,
+                  extern_libs={"leaf": str(leaf)})
+    assert out.item() == 2.25
+
+
+def test_cpu_external_ir_link_and_disk_cache_invalidation(tmp_path):
+    from triton.language.extra.cpu.tle_ops import raw_call
+
+    @triton.jit
+    def kernel(out, value):
+        result = raw_call("cpu_test_add", value.to(tl.int32))
+        tl.store(out, result)
+
+    library = tmp_path / "leaf.ll"
+    output = torch.empty(1, dtype=torch.int32)
+    compiled_hashes = []
+    for increment in (17, 29):
+        library.write_text(
+            "define i32 @cpu_test_add(i32 %x) {\n"
+            f"  %y = add i32 %x, {increment}\n"
+            "  ret i32 %y\n}\n"
+        )
+        # As with loaded DSOs, library files remain immutable while a prepared
+        # kernel is used. A fresh JIT object exercises persistent cache lookup.
+        fresh = triton.jit(kernel.fn)
+        compiled = fresh.warmup(output, 7, grid=(1,), extern_libs={"leaf": str(library)})
+        fresh[(1,)](output, 7, extern_libs={"leaf": str(library)})
+        assert output.item() == 7 + increment
+        compiled_hashes.append(compiled.hash)
+    assert compiled_hashes[0] != compiled_hashes[1]
+
+
+def test_cpu_external_ir_tls_uses_shared_library_relocations(tmp_path):
+    import ctypes
+
+    from triton.language.extra.cpu.tle_ops import raw_call
+
+    library = tmp_path / "tls.ll"
+    library.write_text(
+        "@counter = internal thread_local global i32 0\n"
+        "define i32 @cpu_test_tls(i32 %x) {\n"
+        "  %old = load i32, ptr @counter\n"
+        "  %sum = add i32 %old, %x\n"
+        "  store i32 %sum, ptr @counter\n"
+        "  ret i32 %sum\n}\n"
+        "!llvm.module.flags = !{!0, !1}\n"
+        '!0 = !{i32 8, !"PIC Level", i32 2}\n'
+        '!1 = !{i32 7, !"PIE Level", i32 2}\n'
+    )
+
+    @triton.jit
+    def kernel(out, value):
+        tl.store(out, raw_call("cpu_test_tls", value.to(tl.int32)))
+
+    output = torch.zeros(1, dtype=torch.int32)
+    compiled = kernel.warmup(output, 7, grid=(1,), enable_single_program_entry=True,
+                             extern_libs={"tls": str(library)})
+    assert '\"PIE Level\", i32 0' in compiled.asm["llir"]
+    dso = ctypes.CDLL(compiled.metadata_group[compiled.name + ".so"])
+    entry = getattr(dso, compiled.metadata.single_program_name)
+    entry.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    entry.restype = None
+    for expected in (7, 14):
+        entry(output.data_ptr(), 7)
+        assert output.item() == expected
