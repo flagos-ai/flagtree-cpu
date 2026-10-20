@@ -21,6 +21,13 @@ def raw_call(symbol, *args, result_dtype=core.int32, _semantic=None):
     explicit integer/float widths. Set result_dtype=None for a void function.
     This call is retained when its result is unused.
 
+    CPU ``extern_libs={name: bitcode_path}`` can link leaves from LLVM bitcode
+    before optimization. Use a compatible LLVM toolchain, host architecture,
+    target features and C ABI. Compile shared-object leaves with ``-fPIC``;
+    CPU linking overrides PIE module flags because the JIT loads a DSO.
+    Bitcode contents participate in the persistent compilation cache key.
+    Keep files immutable while a prepared kernel is in use: the process-local
+    JIT cache retains already compiled entries, like loaded shared libraries.
     """
     symbol = core._unwrap_if_constexpr(symbol)
     result_dtype = core._unwrap_if_constexpr(result_dtype)
