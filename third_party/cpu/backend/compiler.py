@@ -241,6 +241,13 @@ class CPUBackend(BaseBackend):
         if self.use_fixed_i8mm():
             features = {feature for feature in features if not feature.startswith("sve")}
         elif not self.supports_sve2_i8mm() and not self.supports_fixed_i8mm():
+            # Darwin may deny feature sysctls in a sandbox while LLVM still
+            # identifies the host CPU. Its CPU model can enable instructions
+            # (for example BF16) even with an incomplete feature set. Assemble
+            # for that same model rather than Clang's generic AArch64 target.
+            if (platform.system() == "Darwin" and self.cpu_arch in ("aarch64", "arm64", "armv8")
+                    and self.cpu_name not in ("", "generic")):
+                return [f"-mcpu={self.cpu_name}"]
             return []
 
         extensions = {
