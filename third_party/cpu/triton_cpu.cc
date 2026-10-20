@@ -3,6 +3,7 @@
 #include "TritonCPUTransforms/Passes.h"
 #include "TritonToTritonCPU/Passes.h"
 
+#include "../../python/src/ir.h"
 #include "triton/Dialect/TritonCPU/IR/Dialect.h"
 
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
@@ -269,6 +270,17 @@ void init_triton_cpu(py::module &&m) {
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });
+
+  m.def("create_raw_call",
+        [](TritonOpBuilder &builder, const std::string &symbol,
+           const std::vector<mlir::Value> &args,
+           py::object result) -> py::object {
+          mlir::Type type =
+              result.is_none() ? mlir::Type() : result.cast<mlir::Type>();
+          auto op =
+              builder.create<mlir::triton::cpu::RawCallOp>(type, args, symbol);
+          return type ? py::cast(op.getResult()) : py::none();
+        });
 
   m.def("find_kernel_names", [](mlir::ModuleOp &mod) {
     std::vector<std::string> res;

@@ -19,9 +19,22 @@ class TTC_Op<string mnemonic, list<Trait> traits = []> :
        !listconcat(traits, [])> {
 }
 
+// Shared memory resource for native calls and CPU memory operations.
+def GlobalMemory : Resource<"::mlir::triton::GlobalMemory">;
+
+// Native C ABI leaf, following the existing ARM TLE CPU runtime-call model.
+// Unlike elementwise math, this call may read/write buffers and its result
+// may be unused while the call must still execute.
+def TTC_RawCallOp : TTC_Op<"raw_call", [MemoryEffects<[
+    MemRead<GlobalMemory>, MemWrite<GlobalMemory>]>]> {
+    let summary = "TLE CPU scalar native C ABI call";
+    let arguments = (ins Variadic<AnyTypeOf<[AnyInteger, AnyFloat]>>:$args, StrAttr:$symbol);
+    let results = (outs Optional<AnyTypeOf<[AnyInteger, AnyFloat]>>:$result);
+    let assemblyFormat = "operands attr-dict `:` functional-type(operands, $result)";
+}
+
 //
 // External Elementwise op
-//
 def TTC_ExternElementwiseOp : TTC_Op<"extern_elementwise", [Elementwise,
                                                             SameOperandsAndResultEncoding,
                                                             SameVariadicOperandSize,
@@ -71,9 +84,6 @@ def TTC_PtrToMemRefOp : TTC_Op<"ptr_to_memref", [NoMemoryEffect]> {
 
   let assemblyFormat = "$src attr-dict `:` type($src) `->` type($result)";
 }
-
-def GlobalMemory : Resource<"::mlir::triton::GlobalMemory">;
-
 
 def TTC_LoadOp : TTC_Op<"load", [
   MemoryEffects<[MemRead<GlobalMemory>]>,

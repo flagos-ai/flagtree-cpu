@@ -1,3 +1,4 @@
+// RUN: sed -n '/^\/\/ CPU-RAW-BEGIN/,$p' %s | triton-opt -triton-cpu-memory-op-to-llvm -canonicalize | FileCheck %s --check-prefix=RAW
 // RUN: triton-opt %s -split-input-file -triton-cpu-convert-memory-ops=use-gather-scatter=true -cse | FileCheck %s
 // RUN: triton-opt %s -split-input-file -triton-cpu-mark-wide-bf16-stores-volatile | FileCheck %s --check-prefix=A720
 
@@ -129,5 +130,33 @@ module {
     %5 = tt.addptr %4, %0 : tensor<128x!tt.ptr<f32>>, tensor<128xi32>
     tt.store %5, %3 : tensor<128x!tt.ptr<f32>>
     tt.return
+  }
+}
+
+// -----
+
+// CPU-RAW-BEGIN
+// Native CPU calls write through addresses. Retain both calls even when the
+// status is unused, reuse a single ABI declaration, and never mark readnone.
+// RAW-DAG: llvm.func @native_pack_leaf(i64, i64, i32) -> i32
+// RAW-DAG: llvm.func @native_float_leaf(i64, f32)
+// RAW-NOT: readnone
+// RAW-LABEL: llvm.func @raw_side_effect
+// RAW-NOT: readnone
+// RAW: llvm.call @native_pack_leaf
+// RAW: llvm.call @native_pack_leaf
+// RAW: llvm.return
+// RAW-LABEL: llvm.func @raw_float_void
+// RAW: llvm.call @native_float_leaf
+// RAW: llvm.return
+module {
+  llvm.func @raw_side_effect(%x: i64, %out: i64, %m: i32) {
+    %r0 = triton_cpu.raw_call %x, %out, %m {symbol = "native_pack_leaf"} : (i64, i64, i32) -> i32
+    %r1 = triton_cpu.raw_call %x, %out, %m {symbol = "native_pack_leaf"} : (i64, i64, i32) -> i32
+    llvm.return
+  }
+  llvm.func @raw_float_void(%out: i64, %limit: f32) {
+    triton_cpu.raw_call %out, %limit {symbol = "native_float_leaf"} : (i64, f32) -> ()
+    llvm.return
   }
 }
