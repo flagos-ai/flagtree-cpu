@@ -84,3 +84,16 @@ def test_vec_cdiv(device):
     arg0 = torch.zeros((16, ), dtype=torch.int32)
     arg1 = torch.empty_like(arg0)
     kernel[(1, )](arg0, arg1)
+
+
+def test_cpu_raw_call_rejects_block_arguments():
+    from triton.language.extra.cpu.tle_ops import raw_call
+    from triton.compiler.errors import CompilationError
+
+    @triton.jit
+    def kernel(out):
+        value = raw_call("not_reached", tl.arange(0, 4))
+        tl.store(out, value)
+
+    with pytest.raises(CompilationError, match="scalar integers or floats"):
+        kernel.warmup(torch.empty(1, dtype=torch.int32), grid=(1,))
