@@ -1,0 +1,70 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+
+# The wheel is built beforehand (packaging/debian/build-helpers); this file
+# only unpacks it into the package tree.
+WHEEL_DIR ?= $(CURDIR)/dist
+PKG = python3-flagtree-cpu
+PYDIR = debian/$(PKG)/usr/lib/python3/dist-packages
+
+%:
+	dh $@ --with python3
+
+override_dh_auto_configure:
+override_dh_auto_build:
+override_dh_auto_test:
+
+override_dh_auto_install:
+	@wheel="$$(ls -1 $(WHEEL_DIR)/flagtree_cpu-*.whl 2>/dev/null | head -1)"; \
+	if [ -z "$$wheel" ]; then \
+		echo "ERROR: no flagtree_cpu-*.whl found under $(WHEEL_DIR)"; \
+		echo "Run packaging/debian/build-helpers/build-flagtree-cpu.sh first."; \
+		exit 1; \
+	fi; \
+	mkdir -p $(PYDIR); \
+	flag=""; \
+	if python3 -m pip install --help | grep -q -- --break-system-packages; then \
+		flag=--break-system-packages; \
+	fi; \
+	python3 -m pip install --no-deps --no-compile --no-index $$flag \
+		--target=$(PYDIR) "$$wheel"
+	# Console scripts (if any) belong in /usr/bin, not dist-packages/bin.
+	if [ -d $(PYDIR)/bin ]; then \
+		mkdir -p debian/$(PKG)/usr/bin; \
+		mv $(PYDIR)/bin/* debian/$(PKG)/usr/bin/; \
+		rmdir $(PYDIR)/bin; \
+	fi
+	# RECORD references the moved bin/ paths and pip does not need it.
+	rm -f $(PYDIR)/flagtree_cpu-*.dist-info/RECORD
+	# The compile-cache key hashes triton/_C/libtriton.so; make sure that
+	# exact name exists even when the wheel only carries the suffixed one.
+	if [ ! -e $(PYDIR)/triton/_C/libtriton.so ]; then \
+		suffixed="$$(ls -1 $(PYDIR)/triton/_C/libtriton.cpython-*.so 2>/dev/null | head -1)"; \
+		test -n "$$suffixed"; \
+		mv "$$suffixed" $(PYDIR)/triton/_C/libtriton.so; \
+	fi
+	test -f $(PYDIR)/triton/_C/libtriton.so
+
+override_dh_gencontrol:
+	@wheel="$$(ls -1 $(WHEEL_DIR)/flagtree_cpu-*.whl | head -1)"; \
+	tag="$$(basename "$$wheel" | sed -E 's/.*-(cp3[0-9]+)-cp3[0-9]+.*/\1/')"; \
+	case "$$tag" in cp3[0-9]*) ;; *) echo "ERROR: cannot read CPython tag from $$wheel"; exit 1;; esac; \
+	pyver="3.$${tag#cp3}"; \
+	echo "python:Depends=python$$pyver" >> debian/$(PKG).substvars; \
+	echo "Wheel targets CPython $$pyver -> Depends: python$$pyver"
+	dh_gencontrol
+
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info
+
+override_dh_python3:
+	dh_python3 --no-ext-rename
+	test -f debian/$(PKG)/usr/lib/python3/dist-packages/triton/_C/libtriton.so
+
+override_dh_strip:
+	# Triton's JIT looks symbols up in libtriton, so keep .symtab/.dynsym and
+	# drop only the DWARF sections.
+	dh_strip --no-automatic-dbgsym -X libtriton
+	find debian/$(PKG) -name 'libtriton*.so' -exec strip --strip-debug {} +
+
+override_dh_dwz:

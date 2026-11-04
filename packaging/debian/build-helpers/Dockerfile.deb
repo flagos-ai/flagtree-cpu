@@ -1,0 +1,110 @@
+# Build the flagtree-cpu wheel, then wrap it into python3-flagtree-cpu_*.deb.
+#
+# Stage 1 (wheel-builder) runs the full Triton/LLVM native build. LLVM is a
+# prebuilt tarball fetched by python/build_helpers.py for the host arch
+# (ubuntu-arm64 / ubuntu-x64). Stage 2 assembles the .deb with debhelper and
+# installs it as a smoke test. The scratch stage is for `--output type=local`.
+ARG DEB_BASE_IMAGE=ubuntu:24.04
+ARG MAX_JOBS=4
+ARG DEB_VERSION_SUFFIX=auto
+
+FROM ${DEB_BASE_IMAGE} AS wheel-builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG MAX_JOBS
+ENV DEBIAN_FRONTEND=noninteractive
+ENV VIRTUAL_ENV=/opt/flagtree-cpu-build-venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PIP_ROOT_USER_ACTION=ignore
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev python3-venv \
+        build-essential clang cmake ninja-build git \
+        zlib1g-dev libxml2-dev \
+        ca-certificates curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# The venv gives a current setuptools/wheel while the wheel ABI stays that of
+# the distribution's python3 (the .deb targets exactly that interpreter).
+RUN python3 -m venv --system-site-packages "${VIRTUAL_ENV}" && \
+    python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+WORKDIR /src
+COPY python/requirements.txt /src/python/requirements.txt
+RUN python -m pip install --no-cache-dir -r python/requirements.txt
+
+COPY python /src/python
+COPY third_party /src/third_party
+COPY include /src/include
+COPY lib /src/lib
+COPY cmake /src/cmake
+COPY bin /src/bin
+COPY test /src/test
+COPY unittest /src/unittest
+COPY CMakeLists.txt pyproject.toml setup.py MANIFEST.in LICENSE README.md /src/
+
+# sleef is a git submodule; a checkout without it builds nothing useful.
+RUN test -f third_party/sleef/CMakeLists.txt \
+    || { echo "ERROR: third_party/sleef is empty; clone with --recurse-submodules"; exit 1; }
+
+# The CPU runtime uses _Float16 in C++, which g++ only accepts on AArch64
+# from GCC 13 (Ubuntu 22.04 ships 11); fall back to clang when the
+# distribution's g++ rejects it.
+RUN echo 'int main(){_Float16 x=0; return (int)x;}' > /tmp/f16.cpp && \
+    if g++ -std=gnu++17 -c /tmp/f16.cpp -o /dev/null 2>/dev/null; then echo gcc; else echo clang; fi > /tmp/cxx-toolchain && \
+    echo "toolchain: $(cat /tmp/cxx-toolchain)"
+
+# Proton off: the CPU backend has no device profiler and the proton build
+# pulls CUPTI headers. Unit tests off: they fetch googletest from GitHub.
+RUN if [ "$(cat /tmp/cxx-toolchain)" = clang ]; then export CC=clang CXX=clang++; fi && \
+    TRITON_WHEEL_NAME=flagtree_cpu \
+    TRITON_BUILD_PROTON=OFF \
+    TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF" \
+    MAX_JOBS=${MAX_JOBS} \
+    python -m pip wheel . --no-build-isolation --no-deps -w /wheels -v && \
+    ls -lh /wheels/ && \
+    test -n "$(ls /wheels/flagtree_cpu-*.whl 2>/dev/null)" && \
+    rm -rf /src/build /root/.triton
+
+FROM ${DEB_BASE_IMAGE} AS deb-assembler
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG DEB_VERSION_SUFFIX
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_ROOT_USER_ACTION=ignore
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        debhelper dh-python python3-all python3-pip python3-setuptools \
+        python3-wheel devscripts fakeroot lintian \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY packaging/debian /build/debian
+COPY --from=wheel-builder /wheels /build/dist
+ENV WHEEL_DIR=/build/dist
+
+# One source version, one binary per distribution: suffix the package
+# version with the distribution so the apt suites do not collide.
+RUN if [ "${DEB_VERSION_SUFFIX}" = "auto" ]; then \
+        . /etc/os-release && suffix="+${ID}${VERSION_ID}"; \
+    else suffix="${DEB_VERSION_SUFFIX}"; fi && \
+    if [ -n "${suffix}" ]; then \
+        base="$(dpkg-parsechangelog -l debian/changelog -SVersion)" && \
+        DEBFULLNAME="FlagOS Contributors" DEBEMAIL="contact@flagos.io" \
+        dch -b -v "${base}${suffix}" -D unstable --force-distribution \
+            "Rebuild for $(. /etc/os-release && echo "${PRETTY_NAME}")." && \
+        echo "Package version: $(dpkg-parsechangelog -l debian/changelog -SVersion)"; \
+    fi
+
+RUN dpkg-buildpackage -us -uc -b && ls -lh /python3-flagtree-cpu_*.deb
+RUN lintian --info --display-info /python3-flagtree-cpu_*.deb || true
+
+# Install smoke: the package must install on a clean system and the CPU
+# backend must be discoverable.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends /python3-flagtree-cpu_*.deb && \
+    TRITON_CPU_BACKEND=1 python3 -c "import triton; from triton.backends import backends; assert 'cpu' in backends, backends; print(triton.__version__, sorted(backends))" && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+FROM scratch AS deb-output
+COPY --from=deb-assembler /python3-flagtree-cpu_*.deb /output/
+COPY --from=deb-assembler /flagtree-cpu_*.changes /output/

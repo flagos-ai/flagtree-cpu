@@ -1,0 +1,3 @@
+# libtriton keeps its symbol table on purpose (the JIT looks symbols up);
+# only the DWARF sections are stripped, see debian/rules.
+unstripped-binary-or-object [usr/lib/python3/dist-packages/triton/_C/libtriton.so]

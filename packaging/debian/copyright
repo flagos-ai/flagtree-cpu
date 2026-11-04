@@ -1,0 +1,64 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: flagtree-cpu
+Upstream-Contact: FlagOS Contributors <contact@flagos.io>
+Source: https://github.com/flagos-ai/flagtree-cpu
+
+Files: *
+Copyright: 2018-2020 Philippe Tillet
+           2020-2022 OpenAI
+           2024-2025 triton-cpu contributors
+           2026 FlagOS Contributors
+License: MIT
+Comment: Triton CPU backend (triton-lang/triton-cpu), carried in FlagOS as
+ flagtree-cpu with AArch64 (NEON/SVE2/I8MM) additions.
+
+# --- Bundled / vendored components shipped inside the .deb ----------
+#
+# The wheel statically embeds artifacts fetched or built at build time.
+# They ship under /usr/lib/python3/dist-packages/triton/ in the .deb.
+
+Files: usr/lib/python3/dist-packages/triton/_C/libtriton.so
+Copyright: 2003-2025 LLVM contributors
+License: Apache-2.0-with-LLVM-exception
+Comment: Statically linked LLVM, pulled at build time from the Triton
+ llvm-builds CDN (https://oaitriton.blob.core.windows.net/public/llvm-builds/);
+ the embedded commit is recorded in cmake/llvm-hash.txt.
+
+Files: usr/lib/python3/dist-packages/triton/_C/libsleef*
+Copyright: 2010-2025 Naoki Shibata and contributors
+License: BSL-1.0
+Comment: SLEEF vectorized math library, built from the third_party/sleef
+ submodule.
+
+Files: third_party/f2reduce/*
+Copyright: 2023 Adam P. Goucher, Hatsya Limited
+License: MIT
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
+License: Apache-2.0-with-LLVM-exception
+ Licensed under the Apache License, Version 2.0 with LLVM Exceptions.
+ On Debian systems, the Apache 2.0 text is in
+ /usr/share/common-licenses/Apache-2.0; the LLVM exception text is at
+ https://llvm.org/LICENSE.txt.
+
+License: BSL-1.0
+ Boost Software License - Version 1.0 - August 17th, 2003. Full text at
+ https://www.boost.org/LICENSE_1_0.txt.

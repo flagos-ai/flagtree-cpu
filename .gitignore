@@ -101,3 +101,6 @@ docs/sg_execution_times.rst
 .DS_Store
 
 AGENTS.override.md
+
+# The deb build helpers are source, not a build tree.
+!packaging/debian/build-helpers/

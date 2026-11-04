@@ -1,0 +1,68 @@
+name: Build Debian Packages
+
+# Verifies that the packaging definition still builds and installs. It is
+# not a release path: packages published to the FlagOS repositories are
+# built and uploaded by flagos-ai/build-infra from a pinned ref, so no tag
+# triggers a build here.
+#
+# PRs trigger this only for packaging-file changes; source changes do not
+# (the full LLVM/Triton wheel build is too heavy for a general PR gate).
+on:
+  pull_request:
+    branches: [triton_v3.7.x, main]
+    paths:
+      - 'packaging/debian/**'
+      - '.github/workflows/build-deb.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-deb:
+    # AArch64 is the primary target of the CPU backend (FEP-0015). The job
+    # builds the full LLVM-linked wheel from source; budget ~2 h on the
+    # 4-vCPU hosted arm runner.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: ubuntu2404
+            base_image: ubuntu:24.04
+            artifact: flagtree-cpu-arm64-ubuntu2404-packages
+          - target: ubuntu2204
+            base_image: ubuntu:22.04
+            artifact: flagtree-cpu-arm64-ubuntu2204-packages
+    env:
+      DEB_BASE_IMAGE: ${{ matrix.base_image }}
+    steps:
+      - name: Free runner disk space
+        run: |
+          if [ "${RUNNER_ENVIRONMENT}" != "github-hosted" ]; then
+            echo "Not a GitHub-hosted runner; skipping disk cleanup."
+            exit 0
+          fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build .deb (${{ matrix.target }})
+        run: bash packaging/debian/build-helpers/build-flagtree-cpu.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/output/*.deb
+          retention-days: 7

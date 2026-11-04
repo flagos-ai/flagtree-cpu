@@ -1,0 +1,68 @@
+name: Build RPM Packages
+
+# Verifies that the packaging definition still builds and installs. It is
+# not a release path: packages published to the FlagOS repositories are
+# built and uploaded by flagos-ai/build-infra from a pinned ref, so no tag
+# triggers a build here.
+#
+# PRs trigger this only for packaging-file changes; source changes do not
+# (the full LLVM/Triton wheel build is too heavy for a general PR gate).
+on:
+  pull_request:
+    branches: [triton_v3.7.x, main]
+    paths:
+      - 'packaging/rpm/**'
+      - '.github/workflows/build-rpm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-rpm:
+    # AArch64 is the primary target of the CPU backend (FEP-0015). The job
+    # builds the full LLVM-linked wheel from source; budget ~2 h on the
+    # 4-vCPU hosted arm runner.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: fedora43
+            base_image: fedora:43
+            artifact: flagtree-cpu-aarch64-fedora43-rpm-packages
+          - target: openeuler2403
+            base_image: openeuler/openeuler:24.03-lts
+            artifact: flagtree-cpu-aarch64-oe2403-rpm-packages
+    env:
+      RPM_BASE_IMAGE: ${{ matrix.base_image }}
+    steps:
+      - name: Free runner disk space
+        run: |
+          if [ "${RUNNER_ENVIRONMENT}" != "github-hosted" ]; then
+            echo "Not a GitHub-hosted runner; skipping disk cleanup."
+            exit 0
+          fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build .rpm (${{ matrix.target }})
+        run: bash packaging/rpm/helpers/build-flagtree-cpu-rpm.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist-rpm/output/*.rpm
+          retention-days: 7

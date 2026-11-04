@@ -1,0 +1,94 @@
+# Build the flagtree-cpu wheel, then wrap it into python3-flagtree-cpu-*.rpm.
+# RPM_BASE_IMAGE: fedora:43 (default) or openeuler/openeuler:24.03-lts.
+ARG RPM_BASE_IMAGE=fedora:43
+ARG MAX_JOBS=4
+
+FROM ${RPM_BASE_IMAGE} AS wheel-builder
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG MAX_JOBS
+ENV PIP_ROOT_USER_ACTION=ignore
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3 python3-pip python3-devel python3-setuptools python3-wheel \
+        gcc gcc-c++ clang make cmake ninja-build git \
+        zlib-devel libxml2-devel \
+        curl ca-certificates \
+    && dnf clean all
+
+# The build tools come from pip so both distributions get the same cmake/ninja
+# generation; the wheel ABI is still the distribution's python3.
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+WORKDIR /src
+COPY python/requirements.txt /src/python/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r python/requirements.txt
+
+COPY python /src/python
+COPY third_party /src/third_party
+COPY include /src/include
+COPY lib /src/lib
+COPY cmake /src/cmake
+COPY bin /src/bin
+COPY test /src/test
+COPY unittest /src/unittest
+COPY CMakeLists.txt pyproject.toml setup.py MANIFEST.in LICENSE README.md /src/
+
+RUN test -f third_party/sleef/CMakeLists.txt \
+    || { echo "ERROR: third_party/sleef is empty; clone with --recurse-submodules"; exit 1; }
+
+# The CPU runtime uses _Float16 in C++, which g++ only accepts on AArch64
+# from GCC 13 (openEuler 24.03 ships 12); fall back to clang when the
+# distribution's g++ rejects it.
+RUN echo 'int main(){_Float16 x=0; return (int)x;}' > /tmp/f16.cpp && \
+    if g++ -std=gnu++17 -c /tmp/f16.cpp -o /dev/null 2>/dev/null; then echo gcc; else echo clang; fi > /tmp/cxx-toolchain && \
+    echo "toolchain: $(cat /tmp/cxx-toolchain)"
+
+# Proton off: the CPU backend has no device profiler and the proton build
+# pulls CUPTI headers. Unit tests off: they fetch googletest from GitHub.
+RUN if [ "$(cat /tmp/cxx-toolchain)" = clang ]; then export CC=clang CXX=clang++; fi && \
+    TRITON_WHEEL_NAME=flagtree_cpu \
+    TRITON_BUILD_PROTON=OFF \
+    TRITON_APPEND_CMAKE_ARGS="-DTRITON_BUILD_UT=OFF" \
+    MAX_JOBS=${MAX_JOBS} \
+    python3 -m pip wheel . --no-build-isolation --no-deps -w /wheels -v && \
+    ls -lh /wheels/ && \
+    test -n "$(ls /wheels/flagtree_cpu-*.whl 2>/dev/null)" && \
+    rm -rf /src/build /root/.triton
+
+FROM ${RPM_BASE_IMAGE} AS rpm-assembler
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV PIP_ROOT_USER_ACTION=ignore
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        rpm-build rpmdevtools \
+        python3 python3-pip python3-devel python3-setuptools python3-wheel \
+    && dnf clean all
+
+RUN rpmdev-setuptree
+# openEuler defines no %dist; tag the Release so the per-distro yum suites
+# do not collide.
+RUN if [ -z "$(rpm --eval '%{?dist}')" ]; then \
+        . /etc/os-release && \
+        case "${ID}" in \
+            openEuler) echo "%dist .oe$(echo "${VERSION_ID}" | tr -d '.')" >> /root/.rpmmacros ;; \
+        esac; \
+    fi
+
+COPY packaging/rpm/specs/flagtree-cpu.spec /root/rpmbuild/SPECS/
+COPY LICENSE /root/rpmbuild/SOURCES/LICENSE
+COPY --from=wheel-builder /wheels /wheels
+
+RUN rpmbuild -ba /root/rpmbuild/SPECS/flagtree-cpu.spec \
+        --define "wheel_dir /wheels" && \
+    ls -lh /root/rpmbuild/RPMS/"$(uname -m)"/
+
+# Install smoke: the package must install on a clean system and the CPU
+# backend must be discoverable.
+RUN dnf install -y /root/rpmbuild/RPMS/"$(uname -m)"/python3-flagtree-cpu-*.rpm && \
+    TRITON_CPU_BACKEND=1 python3 -c "import triton; from triton.backends import backends; assert 'cpu' in backends, backends; print(triton.__version__, sorted(backends))" && \
+    mkdir -p /output && \
+    cp /root/rpmbuild/RPMS/"$(uname -m)"/python3-flagtree-cpu-*.rpm /output/ && \
+    cp /root/rpmbuild/SRPMS/python3-flagtree-cpu-*.src.rpm /output/
+
+FROM scratch AS rpm-output
+COPY --from=rpm-assembler /output/ /output/
