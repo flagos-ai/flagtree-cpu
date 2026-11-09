@@ -1,8 +1,30 @@
 #!/usr/bin/env bash
-# Companion attachment for pr.md. Run on the CIX P1 host as baai.
-# Downloads materials only; container installation follows the article.
+# Prepare materials for cix-p1-workshop.rst. Run on the CIX P1 host as baai.
+# Container creation and wheel installation follow the preparation step.
 set -Eeuo pipefail
 trap 'printf "Preparation stopped at line %s. Existing downloads are retained.\n" "$LINENO" >&2' ERR
+# Keep extraction failures out of the final prebuilt directory.
+install_prebuilt_bundle() (
+  archive="$1"
+  if [[ -d "$WORK_ROOT/prebuilt" && -f "$WORK_ROOT/scripts/prebuilt_tools.py" ]] &&
+      python3 "$WORK_ROOT/scripts/prebuilt_tools.py" verify "$WORK_ROOT"; then
+    return 0
+  fi
+  stage=$(mktemp -d "$WORK_ROOT/downloads/prebuilt-stage.XXXXXX")
+  trap 'rm -rf -- "$stage"' EXIT
+  tar -xzf "$archive" -C "$stage"
+  python3 "$stage/scripts/prebuilt_tools.py" verify "$stage"
+  if [[ -e "$WORK_ROOT/prebuilt" ]]; then
+    backup=$(mktemp -d "$WORK_ROOT/downloads/prebuilt-incomplete.XXXXXX")
+    mv "$WORK_ROOT/prebuilt" "$backup/prebuilt"
+    printf 'Previous incomplete bundle retained at %s\n' "$backup"
+  fi
+  mv "$stage/prebuilt" "$WORK_ROOT/prebuilt"
+  for helper in check_prebuilt.sh install_prebuilt.sh prebuilt_tools.py; do
+    cp -p "$stage/scripts/$helper" "$WORK_ROOT/scripts/$helper"
+  done
+)
+
 [[ ! -f /.dockerenv ]] || { echo 'Run on the P1 host, outside Docker.' >&2; exit 1; }
 [[ "$(uname -s)" == Linux && "$(uname -m)" == aarch64 ]] || { echo 'Requires Linux aarch64 CIX P1.' >&2; exit 1; }
 [[ "$HOME" == /home/baai ]] || { echo 'This article uses the baai account with HOME=/home/baai.' >&2; exit 1; }
@@ -48,7 +70,7 @@ python3 -m venv "$WORK_ROOT/download-env"
 export MODEL_DIR="$WORK_ROOT/models/MiniCPM-V-4.7-1B-W8A8-FlagOS"
 "$WORK_ROOT/download-env/bin/modelscope" download \
   --model FlagRelease/MiniCPM-V-4.7-1B-W8A8-arm-FlagOS \
-  --revision master \
+  --revision 2445f8e669d9ff8c705cbce3951648140e9685ec \
   --local_dir "$MODEL_DIR"
 test -f "$MODEL_DIR/config.json"
 test -f "$MODEL_DIR/model.safetensors.index.json"
@@ -62,11 +84,7 @@ curl -fL --retry 3 "$WHEEL_RELEASE/$WHEEL_PKG" -o "downloads/$WHEEL_PKG"
 printf '%s  %s\n' \
   a53ea331abca38cc75e2192f8291ac8630b2c06451bd3e0a40cdc9b51ef229d4 \
   "downloads/$WHEEL_PKG" | sha256sum -c -
-if [[ ! -e "$WORK_ROOT/prebuilt" ]]; then
-  tar -xzf "downloads/$WHEEL_PKG" -C "$WORK_ROOT"
-else
-  bash "$WORK_ROOT/scripts/check_prebuilt.sh"
-fi
+install_prebuilt_bundle "$WORK_ROOT/downloads/$WHEEL_PKG"
 ls -lh "$WORK_ROOT/prebuilt/wheels"
 
 # Material 5/5
@@ -86,4 +104,4 @@ test "$(git -C "$WORK_ROOT/source/vllm-plugin-FL" rev-parse HEAD)" = \
 
 # Check all prepared inputs before asking the reader to create a container.
 bash "$WORK_ROOT/scripts/check_preloaded.sh"
-printf '\nMaterials ready: %s\nContinue with stage one of the article.\n' "$WORK_ROOT"
+printf '\nMaterials ready: %s\nContinue with the material checks in cix-p1-workshop.rst.\n' "$WORK_ROOT"

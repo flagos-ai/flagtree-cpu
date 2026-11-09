@@ -23,16 +23,19 @@ gzip、sha256sum，以及 ``sudo -n docker`` 权限和 Harbor 拉取权限。
 
 .. code-block:: bash
 
-   curl -fLO https://raw.githubusercontent.com/kevinzs2048/flagtree-cpu/refs/heads/triton_v3.7.x/docs/getting-started/scripts/prepare_workshop.sh
+   curl -fLO https://raw.githubusercontent.com/flagos-ai/flagtree-cpu/refs/heads/triton_v3.7.x/docs/getting-started/scripts/prepare_workshop.sh
    bash prepare_workshop.sh
 
 脚本在 ``/home/baai/workshop1018`` 下载操作脚本、模型、预编译 wheel
 和性能对照所需的 plugin 源码，并从 Harbor 拉取固定镜像，最后校验材料。
+模型固定在 revision ``2445f8e669d9ff8c705cbce3951648140e9685ec``，
+对应清单中的 23 个运行文件，后续 ``master`` 更新不会改变下载版本。
 镜像地址来自随包的 ``scripts/release.env``，不需要手工填写长镜像名。
 登录 Harbor 时按提示输入获授权账号。
 
 看到 ``Materials ready`` 后继续下文。网络中断后可重新运行脚本；它只允许
-继续准备自己创建且尚未安装的目录，不覆盖其他已有目录。
+继续准备自己创建且尚未安装的目录，不覆盖其他已有目录。预编译包先在
+临时目录解压并校验，通过后再放入正式目录；原有不完整包会保留备份。
 已有预置环境直接从下面的“检查材料”开始。
 
 检查材料并创建开发容器
