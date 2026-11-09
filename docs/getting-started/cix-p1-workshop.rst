@@ -23,7 +23,7 @@ gzip、sha256sum，以及 ``sudo -n docker`` 权限和 Harbor 拉取权限。
 
 .. code-block:: bash
 
-   curl -fLO https://raw.githubusercontent.com/kevinzs2048/flagtree-cpu/triton_v3.7.x/docs/getting-started/scripts/prepare_workshop.sh
+   curl -fLO https://raw.githubusercontent.com/kevinzs2048/flagtree-cpu/refs/heads/triton_v3.7.x/docs/getting-started/scripts/prepare_workshop.sh
    bash prepare_workshop.sh
 
 脚本在 ``/home/baai/workshop1018`` 下载操作脚本、模型、预编译 wheel
