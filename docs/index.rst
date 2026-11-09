@@ -9,6 +9,7 @@ Getting Started
 
 - Follow the :doc:`installation instructions <getting-started/installation>` for your platform of choice.
 - Take a look at the :doc:`tutorials <getting-started/tutorials/index>` to learn how to write your first Triton program.
+- Prepare a precompiled Arm CPU environment with the :doc:`CIX P1 Workshop guide <getting-started/cix-p1-workshop>`.
 
 .. toctree::
    :maxdepth: 1
@@ -17,6 +18,7 @@ Getting Started
 
    getting-started/installation
    getting-started/tutorials/index
+   getting-started/cix-p1-workshop
 
 
 Triton API
