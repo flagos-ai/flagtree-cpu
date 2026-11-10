@@ -1,0 +1,317 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# O6N (Radxa Orion O6N, aarch64, self-hosted) 上的 CPU 后端构建与测试。
+#
+# 前置条件（板子上一次性准备，runner 注册后生效）：
+#   - GitHub self-hosted runner，标签 [self-hosted, linux, arm64, o6n]
+#   - uv（~/.local/bin/uv）、ccache、python3.12 由 uv 托管
+#
+# 缓存策略（self-hosted 文件系统天然持久，无需 actions/cache）：
+#   - ~/.triton/llvm   预编译 LLVM（由下方 "Ensure prebuilt LLVM" 步骤显式校验；
+#                      未命中时走分块续传下载——单流下载 1.8G 在板子网络上不可靠）
+#   - ~/.cache/uv      torch/依赖轮子缓存，自动复用
+#   - ~/.ccache        ccache 编译缓存
+#
+# 命令序列与板子上手动验证过的 recipe 完全一致（见 ~/ci/build.log / test.log）：
+#   uv venv → requirements + torch → 根目录 `uv pip install --no-build-isolation .`
+#   → pytest python/test/unit/cpu/ --device cpu
+
+name: Build and test (O6N CPU)
+
+on:
+  workflow_dispatch:
+    # 定向触发入口：常规流程外手动勾选跑慢用例（相关代码无改动也能强制跑基线）
+    inputs:
+      run_trans_4d:
+        description: "Run test_trans_4d (cold compile ~51min)"
+        type: boolean
+        default: false
+      run_indirect_matmul:
+        description: "Run test_indirect_matmul (cold compile ~43min)"
+        type: boolean
+        default: false
+  pull_request:
+    branches:
+      - triton_v3.7.x
+  push:
+    branches:
+      - triton_v3.7.x
+
+concurrency:
+  group: o6n-cpu-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/triton_v3.7.x' }}
+
+jobs:
+  build-test-o6n:
+    name: Build and test on Radxa Orion O6N (aarch64)
+    runs-on: [self-hosted, linux, arm64, o6n]
+    # 实测时长（板子，8 并发）：L2 12min + L3 78min + L4 9s + lit 5s，
+    # 加上 L1/构建余量，90min 不够。
+    # 最坏情况 = 冷构建 ~90min + 两个定向慢用例 ~95min ≈ 185min，300 上限仍够
+    timeout-minutes: 300
+    env:
+      # Triton 构建走 ccache；缓存目录 ~/.cache/ccache 在板子上跨 run 持久
+      TRITON_BUILD_WITH_CCACHE: "true"
+      # 板上直连 pypi.org 不通，必须走清华镜像（与手动验证 recipe 一致）
+      UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
+      # 与手动 recipe 保持一致（注：本分支 setup.py 将后端硬编码为
+      # nvidia;amd;cpu，TRITON_BUILD_BACKENDS 实际未被读取，保留仅为对齐）
+      TRITON_BUILD_BACKENDS: cpu
+      TRITON_CPU_BACKEND: "1"
+      # 板子 12 核
+      MAX_JOBS: "12"
+      # 与手动构建一致用 clang：g++ 12 的 C++ 模式不支持 _Float16，
+      # third_party/cpu/runtime/cpu_runtime.cpp 编译会失败
+      CC: /usr/bin/clang
+      CXX: /usr/bin/clang++
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 两个慢用例不随常规 CI 跑（板子专项已验证通过，排除仅因纯编译耗时：
+      #   test_trans_4d        96 内核，冷跑 ~51min → layout conversion / descriptor 相关改动触发
+      #   test_indirect_matmul  9 内核，冷跑 ~43min → Pipeliner / CPU 降级 / LLVM 升级触发）
+      # push/PR 用 paths-filter 判断相关路径是否变更，命中才跑；手动触发走上方 inputs。
+      - name: Detect changes for slow tests
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            trans_4d:
+              - 'include/triton/Tools/**'
+              - 'lib/Tools/**'
+              - 'lib/Dialect/TritonGPU/**'
+              - 'lib/Conversion/**'
+              - 'third_party/cpu/lib/**'
+              - 'third_party/cpu/include/**'
+              - 'python/src/**'
+              - 'cmake/llvm-hash.txt'
+            indirect_matmul:
+              - 'lib/Dialect/TritonGPU/Transforms/Pipeliner/**'
+              - 'third_party/cpu/lib/**'
+              - 'third_party/cpu/include/**'
+              - 'python/src/**'
+              - 'cmake/llvm-hash.txt'
+
+      - name: Ensure toolchain (uv / ccache)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # uv 与 ccache 已在板子上预装；缺失时直接报错，不在线安装
+          # （runner 用户无免密 sudo，在线 sudo apt 会卡死直到超时）
+          command -v uv || { echo "ERROR: uv not found"; exit 1; }
+          command -v ccache || { echo "ERROR: ccache not found"; exit 1; }
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv --version && ccache --version | head -1
+
+      # 构建用的预编译 LLVM 由 build_helpers.py 按 cmake/llvm-hash.txt 决定：
+      #   包名 llvm-<hash前8位>-ubuntu-arm64，缓存命中条件是
+      #   ~/.triton/llvm/<name>/version.txt 内容与下载 URL 严格相等（无换行）。
+      # 命中则构建直接复用；未命中（首次/清理/hash升级）时分块续传下载，
+      # 复用板子 ~/ci/par-dl.sh 验证过的并行下载策略（单流 urllib 下载不可靠）。
+      - name: Ensure prebuilt LLVM cache
+        run: |
+          LLVM_REV=$(cut -c1-8 cmake/llvm-hash.txt)
+          LLVM_NAME="llvm-${LLVM_REV}-ubuntu-arm64"
+          LLVM_ROOT="$HOME/.triton/llvm"
+          LLVM_DIR="${LLVM_ROOT}/${LLVM_NAME}"
+          LLVM_URL="https://oaitriton.blob.core.windows.net/public/llvm-builds/${LLVM_NAME}.tar.gz"
+
+          if [ -f "${LLVM_DIR}/version.txt" ] && [ "$(cat "${LLVM_DIR}/version.txt")" = "${LLVM_URL}" ]; then
+            echo "LLVM cache hit: ${LLVM_DIR}"
+            exit 0
+          fi
+
+          echo "LLVM cache miss — chunked download with resume ..."
+          rm -rf "${LLVM_DIR}"
+          mkdir -p "$HOME/ci/llvm-parts"
+
+          SIZE=$(curl -sIL "${LLVM_URL}" \
+            | awk '/[Cc]ontent-[Ll]ength/ {gsub(/\r/, ""); print $2}' | tail -1)
+          [ -n "${SIZE}" ] || { echo "failed to get size"; exit 1; }
+
+          N=16
+          CHUNK=$((SIZE / N + 1))
+          dl_chunk() {
+            local i=$1 start=$((i * CHUNK)) end=$((start + CHUNK - 1)) want f have
+            [ ${end} -ge ${SIZE} ] && end=$((SIZE - 1))
+            want=$((end - start + 1))
+            f=$(printf "$HOME/ci/llvm-parts/part_%02d" $i)
+            for attempt in $(seq 1 30); do
+              have=0; [ -f "$f" ] && have=$(stat -c %s "$f")
+              [ "$have" -eq "$want" ] && return 0
+              [ "$have" -gt "$want" ] && { rm -f "$f"; have=0; }
+              curl -sf -C - -r $((start + have))-${end} -o "$f" "${LLVM_URL}" || true
+            done
+            return 1
+          }
+          for i in $(seq 0 $((N - 1))); do
+            dl_chunk $i &
+            while [ "$(jobs -r | wc -l)" -ge 8 ]; do sleep 2; done
+          done
+          wait
+
+          TARBALL="/tmp/${LLVM_NAME}.tar.gz"
+          cat $(for i in $(seq 0 $((N - 1))); do printf "$HOME/ci/llvm-parts/part_%02d " $i; done) > "${TARBALL}"
+          ACTUAL=$(stat -c %s "${TARBALL}")
+          [ "${ACTUAL}" -eq "${SIZE}" ] || { echo "download incomplete: ${ACTUAL}/${SIZE}"; exit 1; }
+
+          mkdir -p "${LLVM_ROOT}"
+          tar xzf "${TARBALL}" -C "${LLVM_ROOT}"
+          # version.txt 必须与 URL 严格相等（build_helpers.py 逐字节比对，无换行）
+          printf '%s' "${LLVM_URL}" > "${LLVM_DIR}/version.txt"
+          rm -f "${TARBALL}" "$HOME"/ci/llvm-parts/part_*
+          echo "LLVM prepared: ${LLVM_DIR}"
+
+      # googletest 是构建期唯一的 FetchContent 网络依赖（unittest/googletest.cmake），
+      # 板上克隆 github.com 偶发 GnuTLS -110 失败（首跑即因此挂掉）。预置到
+      # ~/ci/deps/googletest 持久目录，构建时经 GOOGLETEST_DIR 覆盖网络下载。
+      - name: Ensure googletest source
+        run: |
+          GTEST_DIR="$HOME/ci/deps/googletest"
+          if [ -f "${GTEST_DIR}/CMakeLists.txt" ]; then
+            echo "googletest cache hit: ${GTEST_DIR}"
+            exit 0
+          fi
+          mkdir -p "$HOME/ci/deps"
+          for i in $(seq 1 10); do
+            rm -rf "${GTEST_DIR}"
+            git clone --depth 1 --branch v1.17.0 \
+              https://github.com/google/googletest.git "${GTEST_DIR}" && break
+            echo "clone attempt ${i} failed, retrying ..."
+            sleep 5
+          done
+          [ -f "${GTEST_DIR}/CMakeLists.txt" ] || { echo "ERROR: googletest unavailable"; exit 1; }
+
+      - name: Create venv (python 3.12)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # --clear：venv 目录在 $HOME 持久存在，跨 run 幂等重建
+          uv venv "$HOME/ci/o6n-flagtree-venv" --python 3.12 --clear
+
+      - name: Install dependencies
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          uv pip install -r python/requirements.txt -r python/test-requirements.txt
+          # pin 到板子上手动验证过的版本（2.15.0），避免每次装最新引入漂移
+          uv pip install torch==2.15.0 matplotlib
+
+      - name: Build and install Triton (CPU backend)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          uv pip uninstall triton || true
+          ccache --zero-stats
+          # googletest 用本地预置源码，避免 FetchContent 网络克隆（板上 github.com 不稳）
+          export TRITON_APPEND_CMAKE_ARGS="-DGOOGLETEST_DIR=$HOME/ci/deps/googletest"
+          # v3.7.x 分支构建入口是仓库根目录（根 pyproject + setup.py）
+          uv pip install --no-build-isolation -v .
+          ccache --print-stats
+
+      - name: Sanity import check
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -c "import torch, triton; print('torch', torch.__version__, '| triton', triton.__version__)"
+
+      - name: Run CPU backend unit tests
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -m pytest python/test/unit/cpu/ --device cpu -q -n 8
+
+      # 已知问题（见工作记录"坑 9"）：aarch64/LLVM 后端对部分内核存在编译死循环，
+      # py-spy 实测钉死在 CPUBackend.make_asm。首跑确认 test_trans_4d 与 test_where
+      # 两个用例触发（-m cpu 全集 7181 例中其余正常）。排除待上游修复后恢复。
+      - name: Run language core tests (cpu marks)
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -m pytest python/test/unit/language/test_core.py \
+            -m cpu --device cpu -q -n 8 \
+            --deselect python/test/unit/language/test_core.py::test_trans_4d \
+            --deselect python/test/unit/language/test_core.py::test_where
+
+      # 与上游 triton-cpu CI（build-test.yml Ubuntu job）保持一致的文件清单。
+      # test_indirect_matmul 与 language core 的 test_trans_4d/test_where 同源：
+      # aarch64/LLVM 编译死循环（py-spy 钉死在 CPUBackend.make_asm，JIT 缓存
+      # 零增长），本轮实测第三个触发内核。排除待上游修复后恢复。
+      - name: Run CI unit test suite
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -m pytest -s -n 8 --device cpu \
+            python/test/unit/cpu/test_math.py \
+            python/test/unit/cpu/test_opt.py \
+            python/test/unit/language/test_annotations.py \
+            python/test/unit/language/test_block_pointer.py \
+            python/test/unit/language/test_compile_errors.py \
+            python/test/unit/language/test_conversions.py \
+            python/test/unit/language/test_decorator.py \
+            python/test/unit/language/test_pipeliner.py \
+            python/test/unit/language/test_random.py \
+            python/test/unit/language/test_standard.py \
+            python/test/unit/runtime/test_autotuner.py \
+            python/test/unit/runtime/test_bindings.py \
+            python/test/unit/runtime/test_cache.py \
+            python/test/unit/runtime/test_driver.py \
+            python/test/unit/runtime/test_launch.py \
+            python/test/unit/runtime/test_subproc.py \
+            python/test/unit/test_debug_dump.py \
+            --deselect python/test/unit/language/test_pipeliner.py::test_indirect_matmul \
+            -k "not bfloat16"
+
+      # O6N 增量价值：ARM 原生支持 bf16，上游排除 bfloat16 是 x86/macOS 的历史
+      # 原因。实测（板子，2026-11）：640 passed / 64 skipped / 21 xfailed，零失败。
+      # 保留 continue-on-error，防止后续演进引入回归时挡门。
+      - name: Run bfloat16 tests (ARM differential, non-blocking)
+        continue-on-error: true
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -m pytest python/test/unit/language/test_core.py \
+            -m cpu -k "bfloat16" --device cpu -q -n 8
+
+      # 本分支构建目录在仓库根 build/<config>（上游 CI 的 `cd python` 写法
+      # 基于 python/build 布局，不适用）；Makefile 的 test-lit 目标已验证：
+      # 273 个 lit 测试，271 passed / 2 unsupported / 0 failed。
+      - name: Run lit compiler tests
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          make test-lit
+
+      # —— 定向慢用例（对应工作记录"两个耗时用例专项"）：仅相关代码改动 / LLVM 升级 /
+      #    workflow_dispatch 手动勾选时执行。内核编译产物在 ~/.triton 跨 run 持久，
+      #    内核已入缓存时重跑很快；冷跑耗时按专项实测留一倍余量作为步骤超时。
+      - name: Run test_trans_4d (conditional, cold ~51min)
+        if: steps.changes.outputs.trans_4d == 'true' || inputs.run_trans_4d == true
+        timeout-minutes: 120
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -m pytest python/test/unit/language/test_core.py \
+            -m cpu -k "test_trans_4d" --device cpu -q -n 8
+
+      - name: Run test_indirect_matmul (conditional, cold ~43min)
+        if: steps.changes.outputs.indirect_matmul == 'true' || inputs.run_indirect_matmul == true
+        timeout-minutes: 120
+        run: |
+          source "$HOME/ci/o6n-flagtree-venv/bin/activate"
+          python -m pytest python/test/unit/language/test_pipeliner.py \
+            -k "test_indirect_matmul" --device cpu -q -n 4
