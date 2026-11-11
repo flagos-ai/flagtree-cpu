@@ -62,6 +62,36 @@ def _normalize_darwin_aarch64_assembly(assembly: str) -> str:
     )
 
 
+def _verify_single_scalar_result(mod, kind):
+    """Prove that the replaced output pointer only receives scalar stores.
+
+    Run after inlining/canonicalization while TTIR still has typed pointers.
+    Reject pointer arithmetic, tensor stores, loads and pointer escape rather
+    than replacing an unverified output buffer with a one-element stack slot.
+    """
+    function = mod.get_function(mod.get_entry_func_name())
+    if not function.get_num_args():
+        raise RuntimeError("Scalar C return requires a final output pointer")
+    output = function.args(function.get_num_args() - 1)
+    if str(output.get_type()) != f"!tt.ptr<{kind}>":
+        raise RuntimeError("Scalar C return requires a final output pointer matching the return type")
+
+    invalid_uses = []
+
+    def verify_use(operation):
+        for index in range(operation.get_num_operands()):
+            if operation.get_operand(index).id() != output.id():
+                continue
+            if (operation.get_name() != "tt.store" or index != 0
+                    or str(operation.get_operand(1).get_type()) != kind):
+                invalid_uses.append(operation.get_name())
+
+    mod.walk(verify_use)
+    # Do not throw through MLIR's C++ walk callback, which is non-unwinding.
+    if invalid_uses:
+        raise RuntimeError("Scalar C return output permits only direct, matching scalar stores")
+
+
 @dataclass(frozen=True)
 class CPUOptions:
     # GPU-specific options are used in several places.
@@ -75,6 +105,11 @@ class CPUOptions:
     # Max number of threads to be used for a kernel call.
     # Zero value is used to utilize all available CPU cores.
     num_cpu_threads: int = 0
+    # Extra C entry taking only kernel arguments, with program IDs 0 and grid 1.
+    # The ordinary grid launcher ABI is always preserved.
+    enable_single_program_entry: bool = False
+    # Optionally return the final scalar output argument through the C ABI.
+    single_program_return_type: Optional[str] = None
     cluster_dims: tuple = (1, 1, 1)
     extern_libs: dict = None
     debug: bool = False
@@ -102,10 +137,20 @@ class CPUOptions:
     a720_bf16_store_workaround: bool = False
 
     def __post_init__(self):
-        pass
+        if self.extern_libs:
+            libraries = self.extern_libs.items() if isinstance(self.extern_libs, dict) else self.extern_libs
+            object.__setattr__(self, "extern_libs", tuple(sorted(
+                (name, str(Path(path).resolve())) for name, path in libraries
+            )))
+        if self.single_program_return_type not in (None, "i32", "i64", "f32", "f64"):
+            raise ValueError("Unsupported single-program C return type")
+        if self.single_program_return_type and not self.enable_single_program_entry:
+            raise ValueError("A scalar C return requires enable_single_program_entry")
 
     def hash(self):
         hash_dict = dict(self.__dict__)
+        for name, path in self.extern_libs or ():
+            hash_dict["extern:" + name] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         key = "_".join([f"{name}-{val}" for name, val in sorted(hash_dict.items())])
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
@@ -196,6 +241,13 @@ class CPUBackend(BaseBackend):
         if self.use_fixed_i8mm():
             features = {feature for feature in features if not feature.startswith("sve")}
         elif not self.supports_sve2_i8mm() and not self.supports_fixed_i8mm():
+            # Darwin may deny feature sysctls in a sandbox while LLVM still
+            # identifies the host CPU. Its CPU model can enable instructions
+            # (for example BF16) even with an incomplete feature set. Assemble
+            # for that same model rather than Clang's generic AArch64 target.
+            if (platform.system() == "Darwin" and self.cpu_arch in ("aarch64", "arm64", "armv8")
+                    and self.cpu_name not in ("", "generic")):
+                return [f"-mcpu={self.cpu_name}"]
             return []
 
         extensions = {
@@ -274,6 +326,8 @@ class CPUBackend(BaseBackend):
         # leaving the annotation in IR without changing generated code.
         passes.ttir.add_loop_unroll(pm)
         pm.run(mod, "make_ttir")
+        if opt.single_program_return_type:
+            _verify_single_scalar_result(mod, opt.single_program_return_type)
         return mod
 
     @staticmethod
@@ -413,13 +467,24 @@ class CPUBackend(BaseBackend):
         # alignment cliff while preserving the 16-element compute tile.
         if options.a720_bf16_store_workaround:
             cpu.passes.ttcpuir.add_mark_wide_bf16_stores_volatile(pm)
-        if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "0":
-            passes.llvmir.add_di_scope(pm)
         pm.run(mod, "make_llir")
 
         # Find kernel fn
         kernel_names = cpu.find_kernel_names(mod)
         assert len(kernel_names) == 1, f"expected exactly 1 kernel in a module, got {kernel_names}"
+
+        if options.enable_single_program_entry:
+            metadata["single_program_name"] = cpu.add_single_program_entry(
+                mod, kernel_names[0], options.single_program_return_type or "void"
+            )
+            metadata["single_program_return_type"] = options.single_program_return_type
+
+        # Create a distinct debug subprogram for each entry after adding the
+        # wrapper; reusing an existing function's DISubprogram is invalid LLVM.
+        if os.environ.get("TRITON_DISABLE_LINE_INFO", "0") == "0":
+            debug_pm = ir.pass_manager(mod.context)
+            passes.llvmir.add_di_scope(debug_pm)
+            debug_pm.run(mod, "make_llir_debug_scope")
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
         llvm.init_targets()
@@ -428,9 +493,13 @@ class CPUBackend(BaseBackend):
         if llvm_mod is None:
             raise RuntimeError("Failed to convert to LLVM IR")
         llvm.set_host_target(llvm_mod)
-        #if options.extern_libs:
-        #    paths = [path for (name, path) in options.extern_libs]
-        #   llvm.link_extern_libs(llvm_mod, paths)
+        if options.extern_libs:
+            # CPU kernels are shared libraries, never PIE executables. Prevent
+            # linked C/C++ bitcode from importing an executable TLS model.
+            llvm_mod.add_flag(llvm.MODULE_FLAG_BEHAVIOR_OVERRIDE, "PIC Level", 2)
+            llvm_mod.add_flag(llvm.MODULE_FLAG_BEHAVIOR_OVERRIDE, "PIE Level", 0)
+            paths = [path for _, path in options.extern_libs]
+            llvm.link_extern_libs(llvm_mod, paths)
         llvm.optimize_module(llvm_mod, llvm.OPTIMIZE_O3)
         # Get some metadata
         metadata["shared"] = 0
