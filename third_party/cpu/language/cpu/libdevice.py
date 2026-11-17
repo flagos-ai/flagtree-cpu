@@ -30,6 +30,15 @@ def atan(arg0, _semantic=None):
 
 
 @core.extern
+def atan2(arg0, arg1, _semantic=None):
+    return core.extern_elementwise(
+        "", "", [arg0, arg1], {
+            (core.dtype("fp32"), core.dtype("fp32")): ("Sleef_atan2f%(numel)_u10", core.dtype("fp32")),
+            (core.dtype("fp64"), core.dtype("fp64")): ("Sleef_atan2%(numel)_u10", core.dtype("fp64")),
+        }, is_pure=True, _semantic=_semantic)
+
+
+@core.extern
 def atanh(arg0, _semantic=None):
     return core.tensor(_semantic.builder.create_atanh(arg0.handle), arg0.type)
 
@@ -72,6 +81,16 @@ def expm1(arg0, _semantic=None):
 @core.extern
 def floor(arg0, _semantic=None):
     return core.tensor(_semantic.builder.create_floor(arg0.handle), arg0.type)
+
+
+@core.extern
+def hypot(arg0, arg1, _semantic=None):
+    # SLEEF ships no u10 variant for hypot; u35 (3.5 ULP) is its tightest.
+    return core.extern_elementwise(
+        "", "", [arg0, arg1], {
+            (core.dtype("fp32"), core.dtype("fp32")): ("Sleef_hypotf%(numel)_u35", core.dtype("fp32")),
+            (core.dtype("fp64"), core.dtype("fp64")): ("Sleef_hypot%(numel)_u35", core.dtype("fp64")),
+        }, is_pure=True, _semantic=_semantic)
 
 
 @core.extern
