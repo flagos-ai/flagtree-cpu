@@ -209,6 +209,33 @@ struct ExtractMemRefOpConversion : public OpConversionPattern<ExtractMemRefOp> {
   }
 };
 
+// CPU TLE Raw/native leaves keep compute in the operator library. The
+// compiler owns ABI lowering, conservative memory effects and launch code.
+struct RawCallOpConversion : public OpConversionPattern<RawCallOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(RawCallOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto module = op->getParentOfType<ModuleOp>();
+    auto result = op.getNumResults()
+                      ? getTypeConverter()->convertType(op.getResult().getType())
+                      : LLVM::LLVMVoidType::get(op.getContext());
+    auto args = llvm::to_vector(adaptor.getArgs().getTypes());
+    auto type = LLVM::LLVMFunctionType::get(result, args, false);
+    auto function = module.lookupSymbol<LLVM::LLVMFuncOp>(op.getSymbol());
+    if (function && function.getFunctionType() != type)
+      return rewriter.notifyMatchFailure(op, "native C ABI signature mismatch");
+    if (!function) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      function =
+          LLVM::LLVMFuncOp::create(rewriter, op.getLoc(), op.getSymbol(), type);
+    }
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, function, adaptor.getArgs());
+    return success();
+  }
+};
+
 struct MemoryOpToLLVM
     : public triton::impl::MemoryOpToLLVMBase<MemoryOpToLLVM> {
   using MemoryOpToLLVMBase::MemoryOpToLLVMBase;
@@ -223,7 +250,9 @@ struct MemoryOpToLLVM
     TritonCPUToLLVMTypeConverter typeConverter(context, option);
     TritonLLVMConversionTarget convTarget(*context);
 
+    convTarget.addIllegalOp<RawCallOp>();
     RewritePatternSet patterns(context);
+    patterns.add<RawCallOpConversion>(typeConverter, context);
     patterns.add<LoadOpConversion>(typeConverter, context);
     patterns.add<StoreOpConversion>(typeConverter, context);
     patterns.add<PtrToIntOpConversion>(typeConverter, context);
